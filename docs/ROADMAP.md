@@ -4,7 +4,7 @@ For anyone curious what may come next: ideas worth doing, each with its trade-of
 
 ## 1. Smarter search
 
-Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Step 1 is done; the recommended order for the rest is: model-made synonyms, then a deep scan of one chat in memory, then steps 3 and 4 if they are still needed. Step 2 is better skipped.
+Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Step 1 is done; the recommended order for the rest is: model-made synonyms, then a deep scan of one chat in memory (done), then the encrypted index (step 3) and step 4 if they are still needed. Step 2 is better skipped.
 
 ### Step 1: query expansion, no index (done, 21.10.2026; opt-in per call)
 
@@ -14,9 +14,9 @@ With `expand=true`, `search_messages` sends a short series of Telegram queries (
 
 Before the search, the host asks the local model for two or three synonyms or translations of the key word ("теплица": "greenhouse", "парник") and searches each with the same cascade. Text stays on the PC. The price: one extra local model call per search (seconds on a 12 GB card), more Telegram requests, and synonyms that drift off the meaning; it helps only `tgmcp ask`, not other MCP clients, which make their own rephrasings.
 
-### Next: deep scan of one chat in memory
+### Deep scan of one chat in memory (done, 21.10.2026)
 
-For one named chat, the server reads its last few thousand messages into memory and matches them itself with trigrams or a regular expression, so a fragment ("трактор" inside "минитрактор", "traktor" inside "minitraktor") is found where Telegram's prefix search cannot. Nothing is written to disk and the copy is gone when the call ends; never across all chats, never for hidden chats. The price: time (a few thousand messages are tens of Telegram requests, seconds to a minute), flood waits on large chats, and a cap on how far back it looks.
+`scan_chat` reads the last few thousand messages of one named chat into memory and matches them itself (fragment, words, regex, up to 2 typos), so "трактор" inside "минитрактор" is found where Telegram's prefix search cannot. Every answer states how far it looked (`scanned`, dates, `reached_start`, `stopped_by`), so an empty answer is not read as "nothing exists". Nothing is written to disk; never across all chats, never for hidden chats. How it works: [tools.md](tools.md#deep-scan).
 
 ### Step 2: splitting compound words
 
@@ -24,7 +24,7 @@ A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can spli
 
 ### Step 3: a local full-text index (SQLite FTS5)
 
-Opt-in: download the text of chosen chats into an encrypted database on disk and search it with a trigram tokenizer (fragments: "traktor" inside "minitraktor"), stemming, phrase search and relevance ranking; instant and offline. The price is the main promise of today's design: a copy of chats on disk. If it comes, it must be opt-in per chat, encrypted with the same per-user protection as `secrets.bin`, easy to delete, respect hidden chats, and warn that the first load of a large chat takes minutes and counts against Telegram's limits.
+The next step: an optional encrypted index, approved in principle by the author on 21.10.2026; design first. Opt-in: download the text of chosen chats into an encrypted database on disk and search it with a trigram tokenizer (fragments: "traktor" inside "minitraktor"), stemming, phrase search and relevance ranking; instant and offline. The price is the main promise of today's design: a copy of chats on disk. If it comes, it must be opt-in per chat, encrypted with the same per-user protection as `secrets.bin`, easy to delete, respect hidden chats, and warn that the first load of a large chat takes minutes and counts against Telegram's limits.
 
 ### Step 4: semantic search over the index
 
@@ -74,7 +74,13 @@ MCP lets a server offer ready-made prompts ("summarise last week in chat X"). A 
 
 ## In-memory result cache per session
 
-Repeated calls for the same page (small models retry a lot) go to Telegram every time and count against flood limits. A cache in the server process, keyed by tool and arguments, for the life of the session, would cut that. Never on disk. The price: stale results within a session; a short time-to-live fixes it.
+Repeated calls for the same page (small models retry a lot) go to Telegram every time and count against flood limits. A cache in the server process, keyed by tool and arguments, for the life of the session, would cut that. Never on disk. Now also motivated by `scan_chat`, which re-reads the same pages on every call. The price: stale results within a session; a short time-to-live fixes it.
+
+## Deep scan: known limits
+
+- The regex guard knowingly does not catch literal-separated runs (`.*a.*a.*c`) and `.+word.*word`: about 1.5 s per 4096-character message, bounded by the per-message budget check.
+- The per-page time estimate includes resolving and the pauses, so it is conservative and may stop a scan a little early.
+- A scan started within 10 s of the soft budget can still hit the hard ceiling during a Telethon flood sleep (accepted).
 
 ## `tgmcp ask --budget`
 

@@ -327,7 +327,16 @@ def build_seed() -> FakeGateway:
 # --- the bench question set -------------------------------------------------------------------
 
 Category = Literal[
-    "lookup", "history", "paging", "context", "topic", "hidden", "refusal", "multilingual", "search"
+    "lookup",
+    "history",
+    "paging",
+    "context",
+    "topic",
+    "hidden",
+    "refusal",
+    "multilingual",
+    "search",
+    "scan",
 ]
 Rule = Callable[[Any], bool]
 Term = str | tuple[str, ...]
@@ -374,6 +383,14 @@ _HIKING = _has("hiking", "-1001")
 _EXPATS = _has("expats", "-1005")
 _NEIGHBOURS_CHAT = _has("-1008", "sąsiedzi", "sasiedzi", "соседи")
 _GARDEN_CHAT = _has("garden", "-1009")
+
+
+def _is_mode(expected: str) -> Rule:
+    """The `mode` argument equals `expected`, case aside; left out, it is the default "fragment"."""
+    return lambda value: (
+        str(expected if value is None and expected == "fragment" else value).strip().lower()
+        == expected
+    )
 
 
 def _expanded(value: object) -> bool:
@@ -653,6 +670,42 @@ QUESTIONS: list[Question] = [
         "Какие компании упоминали в Garden Club?",
         _has("компан"),
         [("GreenCo",)],
+    ),
+    # scan: scan_chat over -1009, the mode and the typo tolerance the question needs.
+    # Each answer term comes from the hit, never from the question.
+    _q(
+        "scan-1",
+        "Найди в Garden Club сообщение, где слово «трактор» стоит внутри другого слова.",
+        [
+            (
+                "scan_chat",
+                {"chat": _GARDEN_CHAT, "query": _has("трактор"), "mode": _is_mode("fragment")},
+            )
+        ],
+        [("минитрактор", "Tomka")],
+    ),
+    _q(
+        "scan-2",
+        "Найди в Garden Club сообщение со словами «поделился» и «теплицей», в любом порядке.",
+        [
+            (
+                "scan_chat",
+                {"chat": _GARDEN_CHAT, "query": _has("поделил"), "mode": _is_mode("words")},
+            )
+        ],
+        [("соседями", "Tomek")],
+    ),
+    _q(
+        "scan-3",
+        "Найди в Garden Club сообщение про «тепплицей»: в слове могла быть одна опечатка.",
+        [("scan_chat", {"chat": _GARDEN_CHAT, "query": _has("тепплиц"), "tolerance": _is(1)})],
+        [("соседями", "поделился")],
+    ),
+    _q(
+        "scan-4",
+        "Найди в Garden Club сообщения по регулярному выражению «Zielon.? firma».",
+        [("scan_chat", {"chat": _GARDEN_CHAT, "query": _has("zielon"), "mode": _is_mode("regex")})],
+        [("odmówi*", "odmówiła")],
     ),
 ]
 

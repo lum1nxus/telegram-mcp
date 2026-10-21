@@ -26,7 +26,7 @@ With a local model instead (Ollama installed, model pulled): `.venv\Scripts\tgmc
 
 ## What it can do
 
-Six tools, all read-only. Details, arguments and limits: [docs/tools.md](docs/tools.md).
+Seven tools, all read-only. Details, arguments and limits: [docs/tools.md](docs/tools.md).
 
 | Tool | What it does |
 |---|---|
@@ -36,6 +36,7 @@ Six tools, all read-only. Details, arguments and limits: [docs/tools.md](docs/to
 | `search_messages` | searches messages in one chat or in all chats, can also try other word forms and scripts when asked with expand=true |
 | `get_messages` | reads a chat's history, newest first, page by page |
 | `get_message_context` | one message with the messages around it |
+| `scan_chat` | reads the recent history of one chat into memory and matches it itself, so a fragment inside a word (a regular expression or a typo too) is found; nothing is stored |
 
 ## What it never does
 
@@ -62,7 +63,7 @@ Your Telegram login and API hash are stored in one file, encrypted with Windows 
 
 ## Status
 
-- Version 0.1.0: the six tools (v1) and local models (`tgmcp ask`, `tgmcp bench`) are merged.
+- Version 0.1.0: the seven tools and local models (`tgmcp ask`, `tgmcp bench`) are merged.
 - Not yet verified live: the LM Studio path (chat window and `--backend lmstudio`), and a full `tgmcp bench` on the candidate models.
 - Pinned versions: Telethon 1.45, mcp 2.3, Python 3.14 for the locked install.
 

@@ -23,7 +23,7 @@ A pull request that touches any of these lists gets an extra review of exactly t
 
 ## Where things are
 
-- `tgmcp/server.py`: the MCP server and its six tools. `tgmcp/models.py`: their output types and the size caps. `tgmcp/resolve.py`: chat lookup and hidden chats. `tgmcp/gateway.py`: the `Gateway` Protocol, the server's only view of Telegram.
+- `tgmcp/server.py`: the MCP server and its seven tools. `tgmcp/models.py`: their output types and the size caps. `tgmcp/resolve.py`: chat lookup and hidden chats. `tgmcp/gateway.py`: the `Gateway` Protocol, the server's only view of Telegram.
 - `tgmcp/telegram/`: the Telethon side. `client.py` holds the request allowlists, `live.py` the `TelethonGateway`, `auth.py` login and logout, `mappers.py` the conversions, `errors.py` the error mapping.
 - `tgmcp/host/`: the local-model host. `backends.py` (Ollama and LM Studio over HTTP, and `local_only`, the rule that keeps them on this computer), `loop.py` (the tool-calling loop), `prompt.py` (its system prompt), `benchdata.py` (the invented account `FakeGateway` and the bench questions), `scorer.py` (the bench's rules and table).
 - `tgmcp/cli.py`: the `tgmcp` command. `tgmcp/config.py`: settings and the data folder. `tgmcp/secrets.py`: the encrypted secrets file.

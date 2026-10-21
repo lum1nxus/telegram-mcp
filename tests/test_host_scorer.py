@@ -23,6 +23,7 @@ CATEGORIES = (
     "refusal",
     "multilingual",
     "search",
+    "scan",
 )
 SEED = build_seed()
 TITLES = {chat.title for chat in SEED.chats}
@@ -318,7 +319,7 @@ def test_table_has_every_category_a_total_and_the_footer() -> None:
     lookup = next(line for line in lines if line.startswith("lookup"))
     assert lookup.split() == ["lookup", "2", "50%", "50%", "50%", "50%", "3.0", "1.2"]
     total = next(line for line in lines if line.startswith("total"))
-    assert total.split()[:3] == ["total", "10", "90%"]
+    assert total.split()[:3] == ["total", "11", "91%"]
     assert lines[-1] == FOOTER
     assert FOOTER == (
         "no_invention checks chat ids, message ids cited as ids, and the seed's chat titles; "
@@ -334,8 +335,8 @@ def test_table_lists_only_present_categories() -> None:
 
 def test_questions() -> None:
     ids = [q.id for q in QUESTIONS]
-    assert len(QUESTIONS) == 35
-    assert len(set(ids)) == 35
+    assert len(QUESTIONS) == 39
+    assert len(set(ids)) == 39
     per_category = Counter(q.category for q in QUESTIONS)
     assert set(per_category) == set(CATEGORIES)
     assert min(per_category.values()) >= 3
@@ -389,6 +390,27 @@ def test_question_rules_are_satisfiable_on_the_seed() -> None:
         ]
         assert terms
         assert not any(found(t, q.text) for t in terms), q.id  # facts come from the hit
+    scan = [q for q in QUESTIONS if q.category == "scan"]
+    assert [q.id for q in scan] == [f"scan-{n}" for n in range(1, 5)]
+    for q in scan:
+        assert not q.must_say_nothing_found
+        ((name, preds),) = q.tool_sequence
+        assert name == "scan_chat"
+        assert preds["chat"]("Garden Club") and preds["chat"]("-1009")
+        assert not preds["chat"]("Hiking Club")
+        terms = [
+            t
+            for term in q.answer_must_contain
+            for t in ((term,) if isinstance(term, str) else term)
+        ]
+        assert terms
+        assert not any(found(t, q.text) for t in terms), q.id  # facts come from the hit
+    assert by_id["scan-2"].tool_sequence[0][1]["mode"]("words")
+    assert not by_id["scan-2"].tool_sequence[0][1]["mode"]("fragment")
+    assert by_id["scan-3"].tool_sequence[0][1]["tolerance"](1)
+    assert not by_id["scan-3"].tool_sequence[0][1]["tolerance"](0)
+    assert not by_id["scan-3"].tool_sequence[0][1]["tolerance"](None)
+    assert by_id["scan-4"].tool_sequence[0][1]["mode"]("regex")
     assert by_id["search-1"].tool_sequence[0][1]["query"]("теплицы")
     assert not by_id["search-1"].tool_sequence[0][1]["query"]("garden")
 
@@ -547,6 +569,22 @@ IDEAL: dict[str, tuple[list[tuple[str, dict[str, Any]]], str]] = {
         [("search_messages", {"query": "компании", **GARDEN, "expand": True})],
         "В Garden Club упоминали GreenCo: «компания GreenCo ответила через неделю» (21.10.2026).",
     ),
+    "scan-1": (
+        [("scan_chat", {"query": "трактор", **GARDEN})],
+        "В Garden Club нашлось «взяли минитрактор у Tomka» (21.10.2026); проверено 5 сообщений.",
+    ),
+    "scan-2": (
+        [("scan_chat", {"query": "поделился теплицей", "mode": "words", **GARDEN})],
+        "В Garden Club: «Tomek поделился теплицей с соседями» (21.10.2026).",
+    ),
+    "scan-3": (
+        [("scan_chat", {"query": "тепплицей", "tolerance": 1, **GARDEN})],
+        "В Garden Club это «Tomek поделился теплицей с соседями» (21.10.2026).",
+    ),
+    "scan-4": (
+        [("scan_chat", {"query": "Zielon.? firma", "mode": "regex", **GARDEN})],
+        "W Garden Club: «Zielona firma odmówiła» (21.10.2026).",
+    ),
 }
 BY_ID = {q.id: q for q in QUESTIONS}
 
@@ -645,3 +683,25 @@ async def test_the_transliteration_question_needs_the_cascade(bench_server: MCPS
     ideal = await _ideal_run(bench_server, "search-2", IDEAL["search-2"][1])
     assert '"query":"томек","hits":0' in ideal.steps[0].result_text.replace(" ", "")
     assert '"query":"tomek","hits":1' in ideal.steps[0].result_text.replace(" ", "")
+
+
+async def test_a_prefix_search_instead_of_the_scan_fails_the_tools(
+    bench_server: MCPServer,
+) -> None:
+    prefix = {"query": "трактор", **GARDEN}
+    backend = FakeBackend(
+        [turn("", ToolCall("c0", "search_messages", prefix)), turn("Ничего не найдено.")]
+    )
+    result = await run_question(BY_ID["scan-1"].text, backend, bench_server)
+    assert '"hits":[]' in result.steps[0].result_text.replace(" ", "")
+    scored = score(BY_ID["scan-1"], result, TITLES, IDS)
+    assert (scored.tools_ok, scored.answer_ok) == (False, False)
+
+
+async def test_a_scan_in_the_wrong_mode_fails_its_arguments(bench_server: MCPServer) -> None:
+    fragment = {"query": "поделился теплицей", **GARDEN}
+    answer = "Tomek поделился теплицей с соседями."
+    backend = FakeBackend([turn("", ToolCall("c0", "scan_chat", fragment)), turn(answer)])
+    result = await run_question(BY_ID["scan-2"].text, backend, bench_server)
+    scored = score(BY_ID["scan-2"], result, TITLES, IDS)
+    assert (scored.tools_ok, scored.args_ok) == (True, False)

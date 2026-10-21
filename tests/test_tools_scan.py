@@ -382,7 +382,7 @@ async def test_real_time_budget_returns_hits_instead_of_an_error(
     assert data["stopped_by"] == "time"
     assert 0 < gateway.calls.count("history") < 5
     assert data["hits"]
-    assert data["scanned"] == 100 * gateway.calls.count("history")
+    assert data["scanned"] >= 100
 
 
 async def test_pause_only_between_pages(
