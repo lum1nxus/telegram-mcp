@@ -22,6 +22,7 @@ LMSTUDIO_URL = "http://127.0.0.1:1234"
 DEFAULT_NUM_CTX = 16384
 NOT_FOUND = 404
 _MODEL_PATHS = frozenset({"/api/chat", "/api/show", "/v1/chat/completions"})
+_REASONING_KEYS = frozenset({"thinking", "reasoning", "reasoning_content"})
 _THINK_SPAN = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
 Opener = Callable[[urllib.request.Request, float], Any]
@@ -195,7 +196,7 @@ class OllamaBackend(_Base):
         if not isinstance(message, dict):
             raise BackendError(_UNREADABLE.format(name="Ollama"))
         calls = _tool_calls(message.get("tool_calls"), "Ollama", ids=False)
-        return ModelTurn(_text(message), calls, raw, message)
+        return ModelTurn(_text(message), calls, raw, _echo(message))
 
     async def check_model(self) -> None:
         if self.model.endswith("-cloud"):
@@ -246,7 +247,7 @@ class OpenAICompatBackend(_Base):
         if not isinstance(message, dict):
             raise BackendError(_UNREADABLE.format(name="LM Studio"))
         calls = _tool_calls(message.get("tool_calls"), "LM Studio", ids=True)
-        return ModelTurn(_text(message), calls, raw, message)
+        return ModelTurn(_text(message), calls, raw, _echo(message))
 
     async def check_model(self) -> None:
         listed = await self._http("GET", "/v1/models")
@@ -269,6 +270,15 @@ _UNREADABLE = "{name} returned an answer tgmcp cannot read."
 def _text(message: dict[str, Any]) -> str:
     """The plain content: reasoning fields are never read, a leading <think> span is cut."""
     return _THINK_SPAN.sub("", str(message.get("content") or ""), count=1)
+
+
+def _echo(message: dict[str, Any]) -> dict[str, Any]:
+    """The assistant message to hand back: reasoning fields dropped, a leading <think> span cut,
+    so the history does not grow with the model's thinking."""
+    kept = {key: value for key, value in message.items() if key not in _REASONING_KEYS}
+    if isinstance(kept.get("content"), str):
+        kept["content"] = _text(message)
+    return kept
 
 
 def _tool_calls(items: Any, name: str, *, ids: bool) -> tuple[ToolCall, ...]:
