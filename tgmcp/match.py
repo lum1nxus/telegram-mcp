@@ -15,7 +15,11 @@ Pure and deterministic: no I/O, no state. The scan builds one predicate per call
   never a fuzzy match. In `fragment` mode with tolerance > 0 a query word matches a text word
   that it fuzzy-matches or is an exact substring of; a typo inside a compound is not caught.
 - `regex` (ruling 4) searches the ORIGINAL text, case-insensitive, on at most 4 096
-  characters; `compile_pattern` refuses patterns that could run forever (see its docstring).
+  characters, or 1 024 when the pattern holds two or more unbounded quantifiers;
+  `compile_pattern` refuses patterns that could run forever (see its docstring).
+
+`fragment`, `words`, `fragment_fuzzy` and `fuzzy_word` are public API kept for the future
+index and the tests; `matcher` is what the server uses.
 """
 
 import re
@@ -24,12 +28,14 @@ from dataclasses import dataclass, field
 
 MAX_PATTERN_CHARS = 200
 MAX_TEXT_CHARS = 4096
+MAX_TEXT_CHARS_MULTI = 1024  # for a pattern with two or more unbounded quantifiers
 MIN_JACCARD = 0.3
 MIN_TRIGRAM_WORD = 2  # shorter words have no trigrams
 SHORT_WORD = 3  # up to this many letters: no tolerance
 MEDIUM_WORD = 6  # up to this many letters: tolerance at most 1
 MAX_TOLERANCE = 2
 MAX_UNBOUNDED = 3  # unbounded quantifiers a pattern may hold
+MULTI_UNBOUNDED = 2  # from this many unbounded quantifiers on, the text is cut shorter
 
 _WORD = re.compile(r"\w+")
 _BACK_REFERENCE = re.compile(r"\\[1-9]|\(\?P=")
@@ -264,26 +270,36 @@ def _is_unbounded(quantifier: str) -> bool:
     return _UNBOUNDED.fullmatch(quantifier) is not None
 
 
-def _run(group: _Group) -> Iterator[tuple[str, str]]:
+def _run(group: _Group) -> Iterator[tuple[str, str] | list[_Group]]:
     """The (atom, quantifier) sequence of the group, with plain groups flattened.
 
     An unquantified group without `|` that is not a lookaround is spliced into the sequence
-    (an empty group vanishes); a lookaround counts as the zero-width marker; any other group
-    counts as one atom with its quantifier.
+    (an empty group vanishes); an unquantified group with `|` that is not a lookaround is
+    yielded as the list of its branches; a lookaround counts as the zero-width marker; any
+    other group counts as one atom with its quantifier.
     """
     for item in group.items:
         inner = item.group
-        if (
-            inner is not None
-            and not item.quantifier
-            and not inner.alternation
-            and not inner.lookaround
-        ):
+        plain = inner is not None and not item.quantifier and not inner.lookaround
+        if plain and inner is not None and inner.alternation:
+            yield _branches(inner)
+        elif plain and inner is not None:
             yield from _run(inner)
         elif inner is not None and inner.lookaround:
             yield _ZERO_WIDTH, item.quantifier
         else:
             yield item.atom, item.quantifier
+
+
+def _branches(group: _Group) -> list[_Group]:
+    """The branches of a group holding `|`, each as a group of its own."""
+    branches = [_Group()]
+    for item in group.items:
+        if item.group is None and item.atom == "|":
+            branches.append(_Group())
+        else:
+            branches[-1].items.append(item)
+    return branches
 
 
 def _never_overlap(a: str, b: str) -> bool:
@@ -298,26 +314,62 @@ def _never_overlap(a: str, b: str) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class _Ends:
+    """What a sequence shows its neighbours: the unbounded atoms reachable from its start
+    (`head`) and from its end (`tail`), whether it may match nothing, and whether it holds a
+    run of its own."""
+
+    head: tuple[str, ...]
+    tail: tuple[str, ...]
+    nullable: bool
+    run: bool
+
+
+def _ends(group: _Group) -> _Ends:
+    """Scan the run of a group; an alternation group is seen through each of its branches."""
+    head: list[str] = []
+    reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
+    empty_so_far = True  # everything so far may match nothing
+    for element in _run(group):
+        if isinstance(element, list):
+            branches = [_ends(branch) for branch in element]
+            if any(b.run for b in branches):
+                return _Ends((), (), nullable=False, run=True)
+            starts = [atom for b in branches for atom in b.head]
+            if any(not _never_overlap(seen, atom) for seen in reachable for atom in starts):
+                return _Ends((), (), nullable=False, run=True)
+            head += starts if empty_so_far else []
+            nullable = any(b.nullable for b in branches)
+            tails = [atom for b in branches for atom in b.tail]
+            reachable = [*reachable, *tails] if nullable else tails
+            empty_so_far = empty_so_far and nullable
+            continue
+        atom, quantifier = element
+        nullable = quantifier.startswith(("*", "?", "{0,", "{,", "{0}")) or (
+            not quantifier and atom in _CONSUMES_NOTHING
+        )
+        if _is_unbounded(quantifier):
+            if any(not _never_overlap(seen, atom) for seen in reachable):
+                return _Ends((), (), nullable=False, run=True)
+            head += [atom] if empty_so_far else []
+            reachable = [*reachable, atom] if nullable else [atom]
+        elif not nullable:
+            reachable = []
+        empty_so_far = empty_so_far and nullable
+    return _Ends(tuple(head), tuple(reachable), nullable=empty_so_far, run=False)
+
+
 def _has_unbounded_in_a_row(group: _Group) -> bool:
     """Two overlapping unbounded atoms with nothing between them that must match.
 
     Atoms that may match nothing (`*`, `?`) let the atoms on both sides meet, so an unbounded
     atom is compared with every unbounded atom it can meet, not just the previous one. A
     zero-width atom (`^`, `$`, `\\b`, `\\B`, `\\A`, `\\Z`, an unquantified lookaround) consumes
-    nothing, so it does not break a run either.
+    nothing, so it does not break a run either. An unquantified alternation group passes on
+    the unbounded atoms at the start and at the end of every branch: `(a*|b)a*c` is a run.
     """
-    reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
-    for atom, quantifier in _run(group):
-        nullable = quantifier.startswith(("*", "?", "{0,", "{,", "{0}")) or (
-            not quantifier and atom in _CONSUMES_NOTHING
-        )
-        if _is_unbounded(quantifier):
-            if any(not _never_overlap(seen, atom) for seen in reachable):
-                return True
-            reachable = [*reachable, atom] if nullable else [atom]
-        elif not nullable:
-            reachable = []
-    return False
+    return _ends(group).run
 
 
 def _is_risky(group: _Group) -> bool:
@@ -344,7 +396,15 @@ def _blank(pattern: str) -> str:
     return _CHAR_CLASS.sub(_OPAQUE, escaped)
 
 
-def compile_pattern(pattern: str) -> re.Pattern[str]:
+@dataclass(frozen=True)
+class CompiledPattern:
+    """A compiled scan pattern and the number of its unbounded quantifiers."""
+
+    pattern: re.Pattern[str]
+    unbounded: int
+
+
+def compile_pattern(pattern: str) -> CompiledPattern:
     """Compile a scan pattern with IGNORECASE, refusing what could run forever.
 
     The guard is a heuristic, not a proof. Escapes and character classes count as one plain
@@ -376,11 +436,15 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     - anything `re` cannot compile is refused.
     Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
     and a quantified group with an alternation nested deeper (`((a|b)c)+`).
+    An unquantified alternation group is seen through: the unbounded atoms at the start and
+    at the end of every branch meet the run around the group, so `(a*|b)a*c` and `a*(a*|b)c`
+    are refused while `(a|b)a*c` passes.
     Knowingly not caught: unbounded runs separated by a literal (`a+.a+.a+c`, `.*a.*a.*c`;
-    the count of unbounded quantifiers caps them), a run through an alternation group
-    (`(a*|b)a*`), nested bounded repeats of plain atoms without a group
-    (`a{1,30}b?a{1,30}`), overlapping alternation at the top level, and lookarounds, whose
-    content is checked like any group but not for what it looks at.
+    the count of unbounded quantifiers caps them, and `regex` matches a pattern with two or
+    more of them on the first `MAX_TEXT_CHARS_MULTI` characters only), nested bounded repeats
+    of plain atoms without a group (`a{1,30}b?a{1,30}`), overlapping alternation at the top
+    level, and lookarounds, whose content is checked like any group but not for what it
+    looks at.
     """
     if len(pattern) > MAX_PATTERN_CHARS:
         raise PatternRefused(_TOO_LONG)
@@ -394,17 +458,20 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     leading = _LEADING_ANY.match(pattern)
     stripped = (leading.group(1) or "") + pattern[leading.end() :] if leading else pattern
     tree = _parse(_blank(stripped))[0]
-    if _is_risky(tree) or sum(_is_unbounded(q) for q in _quantifiers(tree)) > MAX_UNBOUNDED:
+    unbounded = sum(_is_unbounded(q) for q in _quantifiers(tree))
+    if _is_risky(tree) or unbounded > MAX_UNBOUNDED:
         raise PatternRefused(_FOREVER)
     try:
-        return re.compile(stripped, re.IGNORECASE)
+        return CompiledPattern(re.compile(stripped, re.IGNORECASE), unbounded)
     except re.error as e:
         raise PatternRefused(f"Not a valid pattern: {e}") from e
 
 
-def regex(compiled: re.Pattern[str], text: str) -> bool:
-    """Whether the pattern occurs in the first `MAX_TEXT_CHARS` characters of the original text."""
-    return compiled.search(text[:MAX_TEXT_CHARS]) is not None
+def regex(compiled: CompiledPattern, text: str) -> bool:
+    """Whether the pattern occurs in the original text, cut to `MAX_TEXT_CHARS` characters
+    or, for two or more unbounded quantifiers, to `MAX_TEXT_CHARS_MULTI`."""
+    cut = MAX_TEXT_CHARS_MULTI if compiled.unbounded >= MULTI_UNBOUNDED else MAX_TEXT_CHARS
+    return compiled.pattern.search(text[:cut]) is not None
 
 
 def matcher(mode: str, query: str, tolerance: int) -> Callable[[str], bool]:

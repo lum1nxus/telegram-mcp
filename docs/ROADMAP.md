@@ -78,7 +78,10 @@ Repeated calls for the same page (small models retry a lot) go to Telegram every
 
 ## Deep scan: known limits
 
-- The regex guard knowingly does not catch literal-separated runs (`.*a.*a.*c`) and `.+word.*word`: about 1.5 s per 4096-character message, bounded by the per-message budget check.
+- The regex guard knowingly does not catch literal-separated runs (`.*a.*a.*c`, `.+word.*word`). Patterns with two or more unbounded quantifiers separated by literals are therefore matched on the first 1024 characters of a message only. Measured worst case, `a.*a.*c` on a 4096-character run of one letter: 53 s before the cap, 0.86 s after it. The per-message budget check runs between messages, not inside one `re.search`, so it does not bound a single match.
+- Three unbounded quantifiers separated by literals (`a+.a+.a+c`) are still allowed and, even on 1024 characters of one letter, ran past 25 s in the probe; consider a shorter cap for three, or allowing at most two.
+- `chat`/`sender` arguments are `str`; a model that passes the numeric id as a number gets a validation error on every tool — consider `str | int` with `str()` normalisation.
+- The bench FakeGateway.history crashes on a naive `since` date (`TypeError` naive vs aware); the live gateway calls `aware()` — align the fake.
 - The per-page time estimate includes resolving and the pauses, so it is conservative and may stop a scan a little early.
 - A scan started within 10 s of the soft budget can still hit the hard ceiling during a Telethon flood sleep (accepted).
 

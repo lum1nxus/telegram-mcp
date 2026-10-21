@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context as ToolContext
@@ -288,6 +288,12 @@ class _Budget:
         return spent + mean <= SCAN_BUDGET_S
 
 
+def _scope(topic: int | None, until: datetime | None) -> str:
+    """The clause naming what the scan was limited to: "" for the whole chat."""
+    clause = f" in topic {topic}" if topic is not None else ""
+    return clause + (f" up to {until:%Y-%m-%d}" if until is not None else "")
+
+
 def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
     stopped_by: StoppedBy,
     title: str,
@@ -296,39 +302,42 @@ def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
     since: datetime | None,
     limit: int,
     wait: int,
+    scope: str = "",
 ) -> str:
     back = f"{oldest:%Y-%m-%d}" if oldest else "the newest message"
     title = quoted(title)
+    last = f"the {scanned} newest messages" if scope else f"the last {scanned} messages"
     match stopped_by:
         case "start":
-            return f"Scanned all {scanned} messages of {title}; the whole chat was covered."
+            covered = "everything in that scope" if scope else "the whole chat"
+            return f"Scanned all {scanned} messages of {title}{scope}; {covered} was covered."
         case "max_messages":
             return (
-                f"Scanned the last {scanned} messages of {title} back to {back}; "
-                "the chat continues further back."
+                f"Scanned {last} of {title}{scope} back to {back}; the chat continues further back."
             )
         case "since":
             when = f"{since:%Y-%m-%d}" if since else back
-            return f"Scanned {scanned} messages of {title} from {when} on."
+            return f"Scanned {scanned} messages of {title}{scope} from {when} on."
         case "time":
             return (
-                f"Scanned {scanned} messages of {title} back to {back} before the "
+                f"Scanned {scanned} messages of {title}{scope} back to {back} before the "
                 f"{SCAN_BUDGET_S:g}-second budget ran out; "
                 "call again with since/until to continue."
             )
         case "flood":
             return (
-                f"Scanned {scanned} messages of {title} back to {back}; "
-                f"Telegram asked to wait {wait} seconds, so the scan stopped there."
+                f"Scanned {scanned} messages of {title}{scope} back to {back}; "
+                f"Telegram asked to wait {wait} seconds, so the scan stopped there; "
+                "do not retry sooner."
             )
         case "limit":
             return (
-                f"Found the newest {limit} hits within the last {scanned} messages of {title} "
+                f"Found the newest {limit} hits within {last} of {title}{scope} "
                 f"(back to {back}); older hits may exist."
             )
 
 
-async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915, C901 - mirrors the tool signature
+async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915, C901 - one loop with every exit spelled out
     app: AppContext,
     chat: str,
     query: str,
@@ -344,6 +353,8 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915, C901 - mirrors the
     """Scan one chat. A non-Busy GatewayError after some pages stays an error on purpose: the
     model retries with `since`/`until`, which is cheaper than guessing what was covered."""
     budget = _Budget()
+    if not query.strip():
+        raise ToolError("query must not be blank.")
     _check_range(since, until)
     try:  # a refused pattern costs no request
         test = match.matcher(mode, query, tolerance)
@@ -410,7 +421,9 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915, C901 - mirrors the
         elapsed_s=round(budget.spent(), 2),
         hits=kept,
         truncated=cut or stopped_by == "limit",
-        note=_scan_note(stopped_by, target.title, scanned, oldest, since, limit, wait),
+        note=_scan_note(
+            stopped_by, target.title, scanned, oldest, since, limit, wait, _scope(topic, until)
+        ),
     )
 
 
@@ -613,10 +626,13 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:  # noqa: C9
             "Patterns with nested quantifiers, alternation inside a repeat, two unbounded "
             "quantifiers in a row (except disjoint classes like `\\d+\\s*`), more than 3 "
             "unbounded quantifiers, back-references, comments or verbose mode are refused, as "
-            "are patterns over 200 characters. `tolerance` 1 or 2 allows that many typos per "
-            "query word in `fragment` and `words` (words of up to 3 letters allow none, 4 to 6 "
-            "letters at most 1); a typo inside a compound word is not caught, and a 5-6-letter "
-            "word with two swapped letters is not a fuzzy match. `sender` is a user id or "
+            "are patterns over 200 characters; empty branches `(|y)` and conditionals "
+            "`(?(1)…)` are refused. Patterns with two or more unbounded quantifiers are "
+            "matched on the first 1024 characters of a message. `tolerance` 1 or 2 allows "
+            "that many typos per query word in `fragment` and `words` (words of up to 3 "
+            "letters allow none, 4 to 6 letters at most 1); a typo inside a compound word is "
+            "not caught, and a 5-6-letter word with two swapped letters is not a fuzzy match. "
+            "`sender` is a user id or "
             "@username from your dialog list; `topic` needs a forum group. Reads at most "
             "`max_messages` messages (3000 by default) in pages of 100 within 60 seconds and "
             "keeps only the hits (the newest `limit`). The result says how far back it looked "
@@ -630,7 +646,7 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:  # noqa: C9
         ctx: ToolContext[AppContext],
         chat: str,
         query: str,
-        mode: Literal["fragment", "words", "regex"] = "fragment",
+        mode: ScanMode = "fragment",
         tolerance: Annotated[int, Field(ge=0, le=2)] = 0,
         topic: int | None = None,
         sender: str | None = None,

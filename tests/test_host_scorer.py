@@ -189,6 +189,12 @@ def test_nothing_found_in_each_language(answer: str, nothing_found: bool) -> Non
     assert score(q, run(answer, step("search_messages")), TITLES, IDS).answer_ok is nothing_found
 
 
+def test_a_scan_that_found_nothing_counts_as_looking() -> None:
+    q = question(must_say_nothing_found=True, tool_sequence=[])
+    assert score(q, run("Nie znalazłem nic.", step("scan_chat")), TITLES, IDS).tools_ok is True
+    assert score(q, run("Nie znalazłem nic."), TITLES, IDS).tools_ok is False
+
+
 def test_terms_are_whole_words_with_prefix_and_case_forms() -> None:
     assert found("Granite", "the granite route")
     assert not found("Granite", "Graniteville")

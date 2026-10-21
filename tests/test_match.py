@@ -6,6 +6,7 @@ import pytest
 
 from tgmcp.match import (
     MAX_PATTERN_CHARS,
+    MAX_TEXT_CHARS_MULTI,
     PatternRefused,
     clamp_tolerance,
     compile_pattern,
@@ -125,8 +126,21 @@ def test_regex_ignorecase_on_original_text() -> None:
 
 def test_regex_scans_at_most_4096_characters() -> None:
     compiled = compile_pattern("needle")
+    assert compiled.unbounded == 0
     assert regex(compiled, "x" * 4090 + "needle")
     assert not regex(compiled, "x" * 4096 + "needle")
+    one = compile_pattern(r"needle\w+")
+    assert one.unbounded == 1
+    assert regex(one, "x" * 2000 + "needles")
+
+
+def test_two_unbounded_quantifiers_match_the_first_1024_characters() -> None:
+    assert MAX_TEXT_CHARS_MULTI == 1024
+    compiled = compile_pattern("teplic.*cena.*zł")
+    assert compiled.unbounded == 2
+    assert regex(compiled, "teplica, cena 100 zł " + "x" * 1000)
+    assert not regex(compiled, "x" * 1024 + "teplica, cena 100 zł")
+    assert compile_pattern(".*teplic.*cena").unbounded == 1  # the leading .* is stripped
 
 
 @pytest.mark.parametrize(
@@ -144,7 +158,7 @@ def test_regex_scans_at_most_4096_characters() -> None:
     ],
 )
 def test_legitimate_patterns_compile(pattern: str) -> None:
-    compiled = compile_pattern(pattern)
+    compiled = compile_pattern(pattern).pattern
     assert isinstance(compiled, re.Pattern)
     assert compiled.flags & re.IGNORECASE
 
@@ -210,6 +224,12 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         "a||b",
         "()x*(?(1)|)x*=",
         "(x)?x*(?(1)|)x*=",
+        # an unbounded atom at an end of an alternation branch meets one outside the group
+        "(a*|b)a*c",
+        "(b|xa*)a*c",
+        "a*(a*|b)c",
+        "a*(?:b|a+x)c",
+        "(a*|(b|a*))a*c",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
@@ -248,6 +268,11 @@ def test_catastrophic_patterns_are_refused(pattern: str) -> None:
         "цена$",
         r"\Ateplic\b",
         r"x*\bx",
+        # alternation groups whose branches cannot meet the run outside
+        "(a|b)a*c",
+        "(a*x|b)a*c",
+        "a*(xa*|b)c",
+        r"(\d+|\s)\s*zł",
     ],
 )
 def test_literal_separated_runs_are_allowed(pattern: str) -> None:
@@ -260,15 +285,15 @@ def test_three_unbounded_quantifiers_are_allowed() -> None:
 
 
 def test_leading_any_is_stripped() -> None:
-    assert compile_pattern(".*abc").pattern == "abc"
-    assert compile_pattern(".*?abc").pattern == "abc"
-    assert compile_pattern("(?s).*abc").pattern == "(?s)abc"
-    assert compile_pattern("(?s).*?теплиц").pattern == "(?s)теплиц"
-    assert compile_pattern(".+abc").pattern == ".+abc"  # needs a character before abc
-    assert compile_pattern("^.*abc").pattern == "^.*abc"  # first line only: kept
-    assert compile_pattern("^.+abc").pattern == "^.+abc"
+    assert compile_pattern(".*abc").pattern.pattern == "abc"
+    assert compile_pattern(".*?abc").pattern.pattern == "abc"
+    assert compile_pattern("(?s).*abc").pattern.pattern == "(?s)abc"
+    assert compile_pattern("(?s).*?теплиц").pattern.pattern == "(?s)теплиц"
+    assert compile_pattern(".+abc").pattern.pattern == ".+abc"  # needs a character before abc
+    assert compile_pattern("^.*abc").pattern.pattern == "^.*abc"  # first line only: kept
+    assert compile_pattern("^.+abc").pattern.pattern == "^.+abc"
     compiled = compile_pattern(".*теплиц.*цена")
-    assert compiled.pattern == "теплиц.*цена"
+    assert compiled.pattern.pattern == "теплиц.*цена"
     assert regex(compiled, "у нас теплица, цена 100")
 
 

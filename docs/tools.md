@@ -99,7 +99,7 @@ Modes:
 
 - `fragment` (default): the query is found anywhere in the text, case and diacritics ignored ("трактор" finds "минитрактор"; "odmow" finds "odmówiła").
 - `words`: every query word must be a whole word of the message, in any order.
-- `regex`: a Python pattern, matched against the original text with IGNORECASE and no folding. A pattern over 200 characters is refused, and so are patterns that could run forever: nested quantifiers, alternation inside a repeat, two unbounded quantifiers in a row (except disjoint classes like `\d+\s*`), more than 3 unbounded quantifiers, back-references, comments and verbose mode. A refused pattern costs no Telegram request. Only the first 4096 characters of a message are matched.
+- `regex`: a Python pattern, matched against the original text with IGNORECASE and no folding. A pattern over 200 characters is refused, and so are patterns that could run forever: nested quantifiers, alternation inside a repeat, two unbounded quantifiers in a row (except disjoint classes like `\d+\s*`), more than 3 unbounded quantifiers, back-references, comments and verbose mode; empty branches `(|y)` and conditionals `(?(1)…)` are refused. A refused pattern costs no Telegram request. Only the first 4096 characters of a message are matched; patterns with two or more unbounded quantifiers are matched on the first 1024 characters of a message.
 
 `tolerance` (1 or 2) lets each query word differ from a whole word of the text by that many typos, in `fragment` and `words`. Words of up to 3 letters allow none, words of 4 to 6 letters at most 1. A typo inside a compound word is not caught ("tracor" does not find "minitractor"), and a 5 to 6-letter word with two swapped letters is not a fuzzy match. With `tolerance` above 0, `fragment` behaves like `words`: the words need not be adjacent.
 
@@ -111,7 +111,7 @@ The result states how far the scan looked, so an empty answer is not read as "no
 |---|---|
 | `scanned` | messages matched (plain messages; service messages are skipped by the gateway) |
 | `oldest_scanned`, `newest_scanned` | the dates of the oldest and newest message matched |
-| `reached_start` | true when the whole chat was covered |
+| `reached_start` | true when the scan reached the oldest message within its scope (chat, topic, until) |
 | `stopped_by` | `start`, `since`, `max_messages`, `limit`, `time` or `flood` |
 | `elapsed_s` | seconds the scan took |
 | `hits` | the matches, newest first, at most `limit`, texts cut to 2000 characters |

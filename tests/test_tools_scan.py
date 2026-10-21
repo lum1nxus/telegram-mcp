@@ -278,7 +278,7 @@ async def test_busy_on_second_page_returns_flood(
     assert [h["id"] for h in data["hits"]] == [450, 400]
     assert data["note"] == (
         f"Scanned 100 messages of 'Plot' back to {_NOW - timedelta(hours=99):%Y-%m-%d}; "
-        "Telegram asked to wait 42 seconds, so the scan stopped there."
+        "Telegram asked to wait 42 seconds, so the scan stopped there; do not retry sooner."
     )
 
 
@@ -345,7 +345,15 @@ async def test_annotations_description_and_seven_tools(client: Client) -> None:
     assert scan.annotations.open_world_hint is False
     description = scan.description or ""
     assert description.endswith(DATA_SENTENCE)
-    for phrase in ("IGNORECASE", "nested quantifiers", "back-references", "compound word"):
+    for phrase in (
+        "IGNORECASE",
+        "nested quantifiers",
+        "back-references",
+        "compound word",
+        "empty branches",
+        "conditionals",
+        "first 1024 characters",
+    ):
         assert phrase in description
     assert scan.input_schema["properties"]["max_messages"]["default"] == 3000
 
@@ -433,3 +441,47 @@ async def test_stopping_on_the_last_message_of_the_chat_reports_start(settings: 
     assert data["reached_start"] is True
     assert data["truncated"] is False
     assert [h["id"] for h in data["hits"]] == [1]
+
+
+async def test_note_under_until_names_the_scope(settings: Settings) -> None:
+    gateway = _chat_with([f"greenhouse {n}" for n in range(1, 11)])
+    until = _NOW - timedelta(hours=3)
+    data = _data(await _scan(gateway, settings, query="greenhouse", until=until.isoformat()))
+    assert data["stopped_by"] == "start"
+    assert data["reached_start"] is True
+    assert f"up to {until:%Y-%m-%d}" in data["note"]
+    assert "whole chat" not in data["note"]
+    assert data["note"].endswith("everything in that scope was covered.")
+
+
+async def test_note_under_topic_names_the_scope(settings: Settings) -> None:
+    gateway = _chat_with(["greenhouse"] * 4, forum=True, topics={1: 1, 2: 7, 3: 7, 4: 1})
+    data = _data(await _scan(gateway, settings, query="greenhouse", topic=7))
+    assert "in topic 7" in data["note"]
+    assert "whole chat" not in data["note"]
+    until = _NOW - timedelta(hours=1)
+    data = _data(
+        await _scan(gateway, settings, query="greenhouse", topic=7, until=until.isoformat())
+    )
+    assert f"in topic 7 up to {until:%Y-%m-%d}" in data["note"]
+
+
+async def test_note_under_scope_says_newest_for_max_messages(settings: Settings) -> None:
+    gateway = _big()
+    data = _data(
+        await _scan(gateway, settings, query="zzz", max_messages=200, until=_NOW.isoformat())
+    )
+    assert data["stopped_by"] == "max_messages"
+    assert data["note"].startswith(
+        f"Scanned the 200 newest messages of 'Plot' up to {_NOW:%Y-%m-%d}"
+    )
+
+
+@pytest.mark.parametrize("mode", ["fragment", "words", "regex"])
+async def test_blank_query_is_error_before_any_history_call(settings: Settings, mode: str) -> None:
+    gateway = _chat_with(["greenhouse"])
+    for query in ("", "   "):
+        result = await _scan(gateway, settings, query=query, mode=mode)
+        assert result.is_error
+        assert "query must not be blank." in _text(result)
+    assert "history" not in gateway.calls

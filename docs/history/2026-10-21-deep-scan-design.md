@@ -2,6 +2,7 @@
 
 Design, 21.10.2026. Status: approved by the author in chat (21.10.2026, "да и да": deep scan
 now, an optional encrypted index as the next step).
+Section 9 records the rulings that changed sections 3–6a during the build; where they differ, section 9 wins.
 
 ## 1. Intent
 
@@ -156,3 +157,16 @@ last 3 000 messages of Garden Club back to 2026-06-01; the chat continues furthe
 - The exact page-time estimate for the time budget.
 - Wording of `note` for each `stopped_by`.
 - The four bench questions and their rules.
+
+## 9. Rulings during the build (21.10.2026)
+
+- `fold` uses an explicit accent table, not NFD: й must stay й.
+- `regex` matches the original text (section 3 corrected).
+- There is no step budget: the guard is a heuristic plus a 1024-character cap for patterns with two or more unbounded quantifiers.
+- No fold cache.
+- A bad `sender` format is refused with "sender must be a user id or @username."
+- A numeric `sender` is used as is.
+- The soft time budget is 50 s, the hard ceiling 60 s.
+- The distance of "trackor" and "tractor" is 1 (the plan's example was wrong).
+- The scan ends on `next_before_id is None` or on a short page that was not stopped early.
+- Under `until` or `topic` the note carries a scope clause (" in topic 7 up to 2026-10-01") instead of claiming the whole chat.
