@@ -38,7 +38,33 @@ _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
 _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
-_LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{])")
+_LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{]|\.[*+])")
+# Blanking: an escape or a character class becomes one atom. The six shorthand classes keep
+# an identity (private-use characters) so that provably disjoint neighbours can be told apart;
+# every other escape and every bracket class becomes the opaque atom.
+_OPAQUE = "\ue010"
+_SHORTHAND = {
+    "d": "\ue000",
+    "D": "\ue001",
+    "s": "\ue002",
+    "S": "\ue003",
+    "w": "\ue004",
+    "W": "\ue005",
+}
+_DIGIT, _NOT_DIGIT = _SHORTHAND["d"], _SHORTHAND["D"]
+_SPACE, _NOT_SPACE = _SHORTHAND["s"], _SHORTHAND["S"]
+_WORD_CLASS, _NOT_WORD = _SHORTHAND["w"], _SHORTHAND["W"]
+_SEPARATE_PAIRS = frozenset(
+    frozenset(pair)
+    for pair in (
+        (_DIGIT, _SPACE),
+        (_DIGIT, _NOT_DIGIT),
+        (_SPACE, _NOT_SPACE),
+        (_WORD_CLASS, _NOT_WORD),
+        (_WORD_CLASS, _SPACE),
+    )
+)
+_NOT_PLAIN = frozenset({*_SHORTHAND.values(), _OPAQUE, ".", "^", "$", "|", ""})
 _LOOKAROUND = ("?=", "?!", "?<=", "?<!")
 
 _FOLD_TABLE = str.maketrans(
@@ -189,6 +215,7 @@ class _Item:
 
     group: _Group | None
     quantifier: str
+    atom: str = ""  # the blanked character of a plain atom; "" for a group
 
 
 def _parse(simple: str, i: int = 0) -> tuple[_Group, int]:
@@ -207,7 +234,8 @@ def _parse(simple: str, i: int = 0) -> tuple[_Group, int]:
             group.alternation = group.alternation or c == "|"
             i += 1
         quantifier = _QUANTIFIER.match(simple, i) if c != "|" else None
-        group.items.append(_Item(child, quantifier.group() if quantifier else ""))
+        atom = "" if child is not None else c
+        group.items.append(_Item(child, quantifier.group() if quantifier else "", atom))
         i = quantifier.end() if quantifier else i
     return group, i
 
@@ -230,8 +258,8 @@ def _is_unbounded(quantifier: str) -> bool:
     return _UNBOUNDED.fullmatch(quantifier) is not None
 
 
-def _run(group: _Group) -> Iterator[str]:
-    """The quantifiers of the group's sequence ("" for none), with plain groups flattened.
+def _run(group: _Group) -> Iterator[tuple[str, str]]:
+    """The (atom, quantifier) sequence of the group, with plain groups flattened.
 
     An unquantified group without `|` that is not a lookaround is spliced into the sequence
     (an empty group vanishes); any other group counts as one atom with its quantifier.
@@ -246,19 +274,36 @@ def _run(group: _Group) -> Iterator[str]:
         ):
             yield from _run(inner)
         else:
-            yield item.quantifier
+            yield item.atom, item.quantifier
+
+
+def _never_overlap(a: str, b: str) -> bool:
+    """Whether two blanked atoms provably match no common character (else: they overlap)."""
+    if frozenset((a, b)) in _SEPARATE_PAIRS:
+        return True
+    for cls, literal in ((a, b), (b, a)):
+        if literal not in _NOT_PLAIN and (
+            (cls == _DIGIT and not literal.isdigit()) or (cls == _SPACE and not literal.isspace())
+        ):
+            return True
+    return False
 
 
 def _has_unbounded_in_a_row(group: _Group) -> bool:
-    """Two unbounded atoms with nothing between them but optional (`?`) atoms."""
-    previous_unbounded = False
-    for quantifier in _run(group):
+    """Two overlapping unbounded atoms with nothing between them that must match.
+
+    Atoms that may match nothing (`*`, `?`) let the atoms on both sides meet, so an unbounded
+    atom is compared with every unbounded atom it can meet, not just the previous one.
+    """
+    reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
+    for atom, quantifier in _run(group):
+        nullable = quantifier.startswith(("*", "?", "{0,", "{,"))
         if _is_unbounded(quantifier):
-            if previous_unbounded:
+            if any(not _never_overlap(seen, atom) for seen in reachable):
                 return True
-            previous_unbounded = True
-        elif not quantifier.startswith("?"):
-            previous_unbounded = False
+            reachable = [*reachable, atom] if nullable else [atom]
+        elif not nullable:
+            reachable = []
     return False
 
 
@@ -275,8 +320,9 @@ def _is_risky(group: _Group) -> bool:
 
 
 def _blank(pattern: str) -> str:
-    """The pattern with escapes and character classes replaced by a plain atom `x`."""
-    return _CHAR_CLASS.sub("x", _ESCAPE.sub("x", pattern))
+    """The pattern with escapes and character classes replaced by one-character atoms."""
+    escaped = _ESCAPE.sub(lambda m: _SHORTHAND.get(m.group()[1], _OPAQUE), pattern)
+    return _CHAR_CLASS.sub(_OPAQUE, escaped)
 
 
 def compile_pattern(pattern: str) -> re.Pattern[str]:
@@ -290,12 +336,17 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
       `(a+)+`, `(a?){25}`, `(a{2,10}){2,10}`, `(.*a){20}`, `((ab)+)+` are refused;
     - any quantifier on a group that contains `|`, at any depth: `(a|aa)+`, `(a|ab){2,}` are
       refused (`cena|price` at the top level passes);
+    - one leading `.*` or lazy `.*?`, also right after an inline flag group at the very start,
+      is stripped unless another `.*`/`.+` follows: under `search` it changes nothing, so
+      `.*abc` and `.*?abc` compile as `abc` and `(?s).*abc` as `(?s)abc`; `.+abc` and
+      `^.*abc` are kept as given; the checks below run on the stripped pattern;
     - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included) are refused:
       `a*a*`, `.*.*`, `\\w+\\w*`. Unquantified plain groups are seen through (`(.*)(.*)=`,
-      `x*()x*=`) and an optional atom does not break the run (`a*b?a*c`, `x*(y)?x*=`);
-    - one leading `.*` or lazy `.*?`, also right after an inline flag group at the very start,
-      is stripped: under `search` it changes nothing, so `.*abc` and `.*?abc` compile as `abc`
-      and `(?s).*abc` as `(?s)abc`; `.+abc` and `^.*abc` are kept as given and counted;
+      `x*()x*=`) and an atom that may match nothing does not break the run (`a*b?a*c`,
+      `x*(y)?x*=`, `\\d+\\s*\\d+`). Exception: atoms whose characters provably never
+      overlap do not form a run; only the shorthand pairs `\\d`/`\\s`, `\\d`/`\\D`,
+      `\\s`/`\\S`, `\\w`/`\\W`, `\\w`/`\\s`, and `\\d` or `\\s` next to one plain
+      character it cannot match, count as disjoint (`\\d+\\s*zł`, `\\d+-+`);
     - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
     - anything `re` cannot compile is refused.
     Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
@@ -308,12 +359,12 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     """
     if len(pattern) > MAX_PATTERN_CHARS:
         raise PatternRefused(_TOO_LONG)
-    if _BACK_REFERENCE.search(pattern) or _is_risky(_parse(_blank(pattern))[0]):
+    if _BACK_REFERENCE.search(pattern):
         raise PatternRefused(_FOREVER)
     leading = _LEADING_ANY.match(pattern)
     stripped = (leading.group(1) or "") + pattern[leading.end() :] if leading else pattern
-    unbounded = sum(_is_unbounded(q) for q in _quantifiers(_parse(_blank(stripped))[0]))
-    if unbounded > MAX_UNBOUNDED:
+    tree = _parse(_blank(stripped))[0]
+    if _is_risky(tree) or sum(_is_unbounded(q) for q in _quantifiers(tree)) > MAX_UNBOUNDED:
         raise PatternRefused(_FOREVER)
     try:
         return re.compile(stripped, re.IGNORECASE)

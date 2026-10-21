@@ -181,6 +181,15 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         "a*b?a*c",
         "x*(y)?x*=",
         r"\w*\s?\w*!",
+        # overlapping classes: the same class, or reachable through an atom that may be empty
+        r"\d+\d*",
+        r"\d+[.,]?\d*",  # `[.,]?` may be empty, so `\d+` meets `\d*`
+        r"\d+\s*\d+",
+        "a*a*b",
+        r"\s*\s*цена",
+        "[а-я]*[а-я ]*X",
+        r"\w+-*\w*",
+        r"\s+ +",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
@@ -198,7 +207,23 @@ def test_catastrophic_patterns_are_refused(pattern: str) -> None:
         compile_pattern(pattern)
 
 
-@pytest.mark.parametrize("pattern", ["a+.a+.a+c", ".*a.*a.*c", "(?=a+)a*"])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "a+.a+.a+c",
+        ".*a.*a.*c",
+        "(?=a+)a*",
+        # disjoint neighbours do not form a run
+        r"\d+\s*zł",
+        r"\w+\s*цена",
+        r"(\d+)\s*(руб|zł)",
+        r"\d+\s*-\s*\d",
+        r"\S+\s+\S+ цена",
+        r".*?\d+ ?zł",
+        r"\d+-+",
+        r"\s*z+",
+    ],
+)
 def test_literal_separated_runs_are_allowed(pattern: str) -> None:
     compile_pattern(pattern)
 
