@@ -190,6 +190,18 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         "[а-я]*[а-я ]*X",
         r"\w+-*\w*",
         r"\s+ +",
+        # zero-width constructs do not break a run; comments and verbose mode are refused
+        "x*(?=x)x*=",
+        "a*(?=a)a*=",
+        "1*(?=1)1*=",
+        r"\s*(?<=\s)\s*=",
+        r"\d*\B\d*=",
+        "x*(?#c)x*=",
+        "(?x)x* x*=",
+        r"(?x)\d+ \d+=",
+        "(?ix)teplic",
+        "(?x:teplic)",
+        "teplic(?#c)",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
@@ -222,6 +234,12 @@ def test_catastrophic_patterns_are_refused(pattern: str) -> None:
         r".*?\d+ ?zł",
         r"\d+-+",
         r"\s*z+",
+        # zero-width atoms are allowed when there is no run
+        r"\bteplic\w*",
+        "^цена",
+        "цена$",
+        r"\Ateplic\b",
+        r"x*\bx",
     ],
 )
 def test_literal_separated_runs_are_allowed(pattern: str) -> None:

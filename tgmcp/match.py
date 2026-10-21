@@ -39,10 +39,14 @@ _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
 _LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{]|\.[*+])")
+_VERBOSE_OR_COMMENT = re.compile(r"\(\?(?:#|[aiLmsux-]*x[aiLmsux-]*[:)])")
 # Blanking: an escape or a character class becomes one atom. The six shorthand classes keep
 # an identity (private-use characters) so that provably disjoint neighbours can be told apart;
-# every other escape and every bracket class becomes the opaque atom.
+# the zero-width assertions \b \B \A \Z get their own marker; every other escape and every
+# bracket class becomes the opaque atom.
 _OPAQUE = "\ue010"
+_ZERO_WIDTH = "\ue011"
+_ASSERTIONS = frozenset("bBAZ")
 _SHORTHAND = {
     "d": "\ue000",
     "D": "\ue001",
@@ -64,7 +68,8 @@ _SEPARATE_PAIRS = frozenset(
         (_WORD_CLASS, _SPACE),
     )
 )
-_NOT_PLAIN = frozenset({*_SHORTHAND.values(), _OPAQUE, ".", "^", "$", "|", ""})
+_NOT_PLAIN = frozenset({*_SHORTHAND.values(), _OPAQUE, _ZERO_WIDTH, ".", "^", "$", "|", ""})
+_CONSUMES_NOTHING = frozenset({_ZERO_WIDTH, "^", "$"})
 _LOOKAROUND = ("?=", "?!", "?<=", "?<!")
 
 _FOLD_TABLE = str.maketrans(
@@ -262,7 +267,8 @@ def _run(group: _Group) -> Iterator[tuple[str, str]]:
     """The (atom, quantifier) sequence of the group, with plain groups flattened.
 
     An unquantified group without `|` that is not a lookaround is spliced into the sequence
-    (an empty group vanishes); any other group counts as one atom with its quantifier.
+    (an empty group vanishes); a lookaround counts as the zero-width marker; any other group
+    counts as one atom with its quantifier.
     """
     for item in group.items:
         inner = item.group
@@ -273,6 +279,8 @@ def _run(group: _Group) -> Iterator[tuple[str, str]]:
             and not inner.lookaround
         ):
             yield from _run(inner)
+        elif inner is not None and inner.lookaround:
+            yield _ZERO_WIDTH, item.quantifier
         else:
             yield item.atom, item.quantifier
 
@@ -293,11 +301,15 @@ def _has_unbounded_in_a_row(group: _Group) -> bool:
     """Two overlapping unbounded atoms with nothing between them that must match.
 
     Atoms that may match nothing (`*`, `?`) let the atoms on both sides meet, so an unbounded
-    atom is compared with every unbounded atom it can meet, not just the previous one.
+    atom is compared with every unbounded atom it can meet, not just the previous one. A
+    zero-width atom (`^`, `$`, `\\b`, `\\B`, `\\A`, `\\Z`, an unquantified lookaround) consumes
+    nothing, so it does not break a run either.
     """
     reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
     for atom, quantifier in _run(group):
-        nullable = quantifier.startswith(("*", "?", "{0,", "{,"))
+        nullable = quantifier.startswith(("*", "?", "{0,", "{,")) or (
+            not quantifier and atom in _CONSUMES_NOTHING
+        )
         if _is_unbounded(quantifier):
             if any(not _never_overlap(seen, atom) for seen in reachable):
                 return True
@@ -319,9 +331,15 @@ def _is_risky(group: _Group) -> bool:
     return _has_unbounded_in_a_row(group)
 
 
+def _blank_escape(letter: str) -> str:
+    if letter in _ASSERTIONS:
+        return _ZERO_WIDTH
+    return _SHORTHAND.get(letter, _OPAQUE)
+
+
 def _blank(pattern: str) -> str:
     """The pattern with escapes and character classes replaced by one-character atoms."""
-    escaped = _ESCAPE.sub(lambda m: _SHORTHAND.get(m.group()[1], _OPAQUE), pattern)
+    escaped = _ESCAPE.sub(lambda m: _blank_escape(m.group()[1]), pattern)
     return _CHAR_CLASS.sub(_OPAQUE, escaped)
 
 
@@ -332,6 +350,8 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     atom, so `\\*`, `[*+]` and `\\(` are not taken for syntax. In this order:
     - a pattern longer than `MAX_PATTERN_CHARS` characters is refused;
     - back-references `\\1`...`\\9` and `(?P=name)` are refused;
+    - comments `(?#...)` and the verbose flag `x` in any inline flag group (`(?x)`, `(?ix)`,
+      `(?x:...)`) are refused: ignored whitespace would hide a run (`(?x)x* x*=`);
     - any quantifier on a group that contains a quantifier, bounded counts and `?` included:
       `(a+)+`, `(a?){25}`, `(a{2,10}){2,10}`, `(.*a){20}`, `((ab)+)+` are refused;
     - any quantifier on a group that contains `|`, at any depth: `(a|aa)+`, `(a|ab){2,}` are
@@ -343,10 +363,12 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included) are refused:
       `a*a*`, `.*.*`, `\\w+\\w*`. Unquantified plain groups are seen through (`(.*)(.*)=`,
       `x*()x*=`) and an atom that may match nothing does not break the run (`a*b?a*c`,
-      `x*(y)?x*=`, `\\d+\\s*\\d+`). Exception: atoms whose characters provably never
-      overlap do not form a run; only the shorthand pairs `\\d`/`\\s`, `\\d`/`\\D`,
-      `\\s`/`\\S`, `\\w`/`\\W`, `\\w`/`\\s`, and `\\d` or `\\s` next to one plain
-      character it cannot match, count as disjoint (`\\d+\\s*zł`, `\\d+-+`);
+      `x*(y)?x*=`, `\\d+\\s*\\d+`), nor does a zero-width atom: `^`, `$`, `\\b`, `\\B`,
+      `\\A`, `\\Z` or an unquantified lookaround (`x*(?=x)x*=`, `\\d*\\B\\d*=`).
+      Exception: atoms whose characters provably never overlap do not form a run; only the
+      shorthand pairs `\\d`/`\\s`, `\\d`/`\\D`, `\\s`/`\\S`, `\\w`/`\\W`, `\\w`/`\\s`, and
+      `\\d` or `\\s` next to one plain character it cannot match, count as disjoint
+      (`\\d+\\s*zł`, `\\d+-+`);
     - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
     - anything `re` cannot compile is refused.
     Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
@@ -359,7 +381,7 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     """
     if len(pattern) > MAX_PATTERN_CHARS:
         raise PatternRefused(_TOO_LONG)
-    if _BACK_REFERENCE.search(pattern):
+    if _BACK_REFERENCE.search(pattern) or _VERBOSE_OR_COMMENT.search(_blank(pattern)):
         raise PatternRefused(_FOREVER)
     leading = _LEADING_ANY.match(pattern)
     stripped = (leading.group(1) or "") + pattern[leading.end() :] if leading else pattern
