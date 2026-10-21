@@ -353,6 +353,7 @@ async def test_annotations_description_and_seven_tools(client: Client) -> None:
         "empty branches",
         "conditionals",
         "first 1024 characters",
+        "first 256",
     ):
         assert phrase in description
     assert scan.input_schema["properties"]["max_messages"]["default"] == 3000

@@ -7,6 +7,7 @@ import pytest
 from tgmcp.match import (
     MAX_PATTERN_CHARS,
     MAX_TEXT_CHARS_MULTI,
+    MAX_TEXT_CHARS_TRIPLE,
     PatternRefused,
     clamp_tolerance,
     compile_pattern,
@@ -141,6 +142,15 @@ def test_two_unbounded_quantifiers_match_the_first_1024_characters() -> None:
     assert regex(compiled, "teplica, cena 100 zł " + "x" * 1000)
     assert not regex(compiled, "x" * 1024 + "teplica, cena 100 zł")
     assert compile_pattern(".*teplic.*cena").unbounded == 1  # the leading .* is stripped
+    assert regex(compiled, "x" * 1000 + "teplica, cena 100 zł")
+
+
+def test_three_unbounded_quantifiers_match_the_first_256_characters() -> None:
+    assert MAX_TEXT_CHARS_TRIPLE == 256
+    compiled = compile_pattern(r"teplic.*cena.*dach\w*")
+    assert compiled.unbounded == 3
+    assert regex(compiled, "x" * 200 + "teplica, cena, dachy " + "x" * 2000)
+    assert not regex(compiled, "x" * 300 + "teplica, cena, dachy " + "x" * 2000)
 
 
 @pytest.mark.parametrize(

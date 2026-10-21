@@ -15,7 +15,7 @@ Pure and deterministic: no I/O, no state. The scan builds one predicate per call
   never a fuzzy match. In `fragment` mode with tolerance > 0 a query word matches a text word
   that it fuzzy-matches or is an exact substring of; a typo inside a compound is not caught.
 - `regex` (ruling 4) searches the ORIGINAL text, case-insensitive, on at most 4 096
-  characters, or 1 024 when the pattern holds two or more unbounded quantifiers;
+  characters, 1 024 when the pattern holds two unbounded quantifiers, 256 when it holds three;
   `compile_pattern` refuses patterns that could run forever (see its docstring).
 
 `fragment`, `words`, `fragment_fuzzy` and `fuzzy_word` are public API kept for the future
@@ -28,14 +28,14 @@ from dataclasses import dataclass, field
 
 MAX_PATTERN_CHARS = 200
 MAX_TEXT_CHARS = 4096
-MAX_TEXT_CHARS_MULTI = 1024  # for a pattern with two or more unbounded quantifiers
+MAX_TEXT_CHARS_MULTI = 1024  # for a pattern with exactly two unbounded quantifiers
+MAX_TEXT_CHARS_TRIPLE = 256  # for a pattern with three unbounded quantifiers
 MIN_JACCARD = 0.3
 MIN_TRIGRAM_WORD = 2  # shorter words have no trigrams
 SHORT_WORD = 3  # up to this many letters: no tolerance
 MEDIUM_WORD = 6  # up to this many letters: tolerance at most 1
 MAX_TOLERANCE = 2
 MAX_UNBOUNDED = 3  # unbounded quantifiers a pattern may hold
-MULTI_UNBOUNDED = 2  # from this many unbounded quantifiers on, the text is cut shorter
 
 _WORD = re.compile(r"\w+")
 _BACK_REFERENCE = re.compile(r"\\[1-9]|\(\?P=")
@@ -100,6 +100,7 @@ _FOLD_TABLE = str.maketrans(
         **dict.fromkeys("ß", "ss"),
     }
 )
+_CUTS = (MAX_TEXT_CHARS, MAX_TEXT_CHARS, MAX_TEXT_CHARS_MULTI, MAX_TEXT_CHARS_TRIPLE)
 _FOREVER = "That pattern could run forever; simplify it."
 _TOO_LONG = f"The pattern is longer than {MAX_PATTERN_CHARS} characters."
 
@@ -441,7 +442,7 @@ def compile_pattern(pattern: str) -> CompiledPattern:
     are refused while `(a|b)a*c` passes.
     Knowingly not caught: unbounded runs separated by a literal (`a+.a+.a+c`, `.*a.*a.*c`;
     the count of unbounded quantifiers caps them, and `regex` matches a pattern with two or
-    more of them on the first `MAX_TEXT_CHARS_MULTI` characters only), nested bounded repeats
+    more of them on a shorter cut of the text, see `regex`), nested bounded repeats
     of plain atoms without a group (`a{1,30}b?a{1,30}`), overlapping alternation at the top
     level, and lookarounds, whose content is checked like any group but not for what it
     looks at.
@@ -468,10 +469,11 @@ def compile_pattern(pattern: str) -> CompiledPattern:
 
 
 def regex(compiled: CompiledPattern, text: str) -> bool:
-    """Whether the pattern occurs in the original text, cut to `MAX_TEXT_CHARS` characters
-    or, for two or more unbounded quantifiers, to `MAX_TEXT_CHARS_MULTI`."""
-    cut = MAX_TEXT_CHARS_MULTI if compiled.unbounded >= MULTI_UNBOUNDED else MAX_TEXT_CHARS
-    return compiled.pattern.search(text[:cut]) is not None
+    """Whether the pattern occurs in the original text, cut by its unbounded quantifiers:
+    0 or 1 → `MAX_TEXT_CHARS` (4096), 2 → `MAX_TEXT_CHARS_MULTI` (1024), 3 →
+    `MAX_TEXT_CHARS_TRIPLE` (256). Each extra literal-separated unbounded quantifier
+    multiplies the worst-case backtracking by the text length, so the cut shrinks with it."""
+    return compiled.pattern.search(text[: _CUTS[compiled.unbounded]]) is not None
 
 
 def matcher(mode: str, query: str, tolerance: int) -> Callable[[str], bool]:
