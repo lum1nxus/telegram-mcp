@@ -8,7 +8,7 @@ from mcp import Client
 from tests.conftest import Call
 from tests.fake_gateway import FakeGateway
 from tgmcp import server
-from tgmcp.gateway import NotLoggedIn
+from tgmcp.gateway import Busy, NotLoggedIn
 from tgmcp.server import _check_range
 
 SENTENCE = (
@@ -91,6 +91,15 @@ async def test_not_logged_in_reason_reaches_the_model(
     result = await call("list_chats", {})
     assert result.is_error
     assert _text(result).endswith(sentence)
+
+
+async def test_flood_wait_sentence_reaches_the_model(call: Call, seed: FakeGateway) -> None:
+    seed.raise_next = Busy(42)
+    result = await call("list_chats", {})
+    assert result.is_error
+    assert _text(result).endswith(
+        "Telegram asks to wait 42 seconds before the next request; do not retry sooner."
+    )
 
 
 async def test_timeout_maps_to_tool_error(

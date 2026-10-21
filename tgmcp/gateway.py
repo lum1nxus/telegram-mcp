@@ -6,6 +6,7 @@ Nothing here imports Telethon. The Telethon side lives in the `tgmcp.telegram` p
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
 from typing import Protocol
@@ -45,6 +46,21 @@ class Busy(GatewayError):  # noqa: N818 - name fixed by the interface
         )
 
 
+@dataclass(frozen=True)
+class History:
+    """One page of history, newest first.
+
+    `next_before_id` is where the next page starts, or None when the history (or the
+    `since` bound) ended. `stopped_early` is true when the page holds fewer than `limit`
+    messages only because a long run of service messages stopped the scan: more history
+    exists below `next_before_id`.
+    """
+
+    messages: list[Message]
+    next_before_id: int | None
+    stopped_early: bool = False
+
+
 class Gateway(Protocol):
     async def me(self) -> Account: ...
 
@@ -67,8 +83,8 @@ class Gateway(Protocol):
         since: datetime | None,
         until: datetime | None,
         limit: int,
-    ) -> list[Message]:
-        """Newest first."""
+    ) -> History:
+        """Newest first; `until` is exclusive to the second, as Telegram's `offset_date`."""
         ...
 
     async def search_in_chat(  # noqa: PLR0913 - signature fixed by the interface
@@ -139,21 +155,18 @@ def aware(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=UTC)
 
 
-def utc_day(day: date) -> date:
-    """The UTC calendar day of a date or datetime (a naive datetime is taken as UTC)."""
-    if isinstance(day, datetime):
-        moment = aware(day)
-        assert moment is not None
-        return moment.astimezone(UTC).date()
-    return day
+def as_utc(value: date) -> date:
+    """A naive datetime is taken as UTC; a plain date is left as it is."""
+    return aware(value) or value if isinstance(value, datetime) else value
 
 
 def day_start(day: date | None) -> datetime | None:
-    return datetime.combine(utc_day(day), dtime.min, tzinfo=UTC) if day else None
+    """The first instant of a UTC day (the tools take `since`/`until` of a search as dates)."""
+    return datetime.combine(day, dtime.min, tzinfo=UTC) if day else None
 
 
 def day_end(day: date | None) -> datetime | None:
     """Exclusive end: the first instant after `day`."""
     if not day:
         return None
-    return datetime.combine(utc_day(day) + timedelta(days=1), dtime.min, tzinfo=UTC)
+    return datetime.combine(day + timedelta(days=1), dtime.min, tzinfo=UTC)

@@ -23,7 +23,8 @@ async def test_search_needs_every_word(seed):
 
 async def test_history_before_id_is_newest_first(seed):
     page = await seed.history(-1001, topic=None, before_id=10, since=None, until=None, limit=3)
-    assert [m.id for m in page] == [9, 8, 7]
+    assert [m.id for m in page.messages] == [9, 8, 7]
+    assert page.next_before_id == 7
 
 
 async def test_around_is_chronological_and_missing_id_raises(seed):

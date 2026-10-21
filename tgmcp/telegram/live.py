@@ -18,12 +18,12 @@ from tgmcp.gateway import (
     RAW_PER_MESSAGE,
     Gateway,
     GatewayError,
+    History,
     IdleGuard,
     NotLoggedIn,
     aware,
     day_end,
     day_start,
-    utc_day,
 )
 from tgmcp.models import Account, Chat, Message, Topic
 from tgmcp.secrets import NoSecrets, SecretsError, read_secrets
@@ -63,24 +63,36 @@ class _Client(Protocol):
 
 async def _collect(
     stream: AsyncIterator[Any], limit: int, too_old: Callable[[Any], bool]
-) -> list[Any]:
-    """Up to `limit` plain messages from a newest-first stream. Stops at the first raw message
-    for which `too_old` is true, or after `limit * RAW_PER_MESSAGE` raw messages so a long run
-    of service messages cannot keep it fetching."""
+) -> tuple[list[Any], int | None, bool]:
+    """Up to `limit` plain messages from a newest-first stream, the id the next page starts
+    below, and whether the scan stopped early.
+
+    Stops at the first raw message for which `too_old` is true (nothing more: no cursor), at
+    `limit` plain messages (cursor: the last one), or after `limit * RAW_PER_MESSAGE` raw
+    messages, so a long run of service messages cannot keep it fetching (cursor: the last raw
+    message scanned, and the early flag, since more history exists below it).
+    """
     out: list[Any] = []
     seen = 0
     async for m in stream:
         seen += 1
-        if m is not None and too_old(m):
-            break
+        if too_old(m):
+            return out, None, False
         if is_plain(m):
             out.append(m)
             if len(out) >= limit:
-                break
+                return out, m.id, False
         if seen >= limit * RAW_PER_MESSAGE:
             log.info("page stopped after %d raw messages", seen)
-            break
-    return out
+            return out, m.id, True
+    return out, None, False
+
+
+async def _plain(client: _Client, limit: int, peer: Any, **kwargs: Any) -> list[Any]:
+    """Up to `limit` raw messages around a target, service messages dropped; none for 0."""
+    if limit == 0:
+        return []
+    return [m async for m in client.iter_messages(peer, limit=limit, **kwargs) if is_plain(m)]
 
 
 def _guard_done(task: asyncio.Task[None]) -> None:
@@ -285,17 +297,23 @@ class TelethonGateway(Gateway):
         since: datetime | None,
         until: datetime | None,
         limit: int,
-    ) -> list[Message]:
+    ) -> History:
         since, until = aware(since), aware(until)
         async with self._session() as client:
             peer = await self._peer(client, chat_id)
             stream = client.iter_messages(
-                peer, limit=None, offset_id=before_id or 0, offset_date=until, reply_to=topic
+                peer,
+                limit=limit * RAW_PER_MESSAGE,  # the scan's own bound; `None` sleeps 1 s per chunk
+                offset_id=before_id or 0,
+                offset_date=until,
+                reply_to=topic,
             )
-            found = await _collect(stream, limit, lambda m: since is not None and m.date < since)
+            found, cursor, early = await _collect(
+                stream, limit, lambda m: since is not None and m.date < since
+            )
             out = [self._map(m, chat_id) for m in found]
-        log.info("history chat=%s n=%d", chat_id, len(out))
-        return out
+        log.info("history chat=%s n=%d early=%s", chat_id, len(out), early)
+        return History(out, cursor, early)
 
     async def _input_user(self, client: _Client, value: str | None) -> Any:
         if value is None:
@@ -356,16 +374,15 @@ class TelethonGateway(Gateway):
     async def search_global(
         self, query: str, *, since: date | None, until: date | None, limit: int
     ) -> list[Message]:
-        first_day = utc_day(since) if since else None
         async with self._session() as client:
             # Newest first, starting at the end of `until`; stop at the first hit before `since`.
             stream = client.iter_messages(
-                None, search=query, limit=None, offset_date=day_end(until)
+                None, search=query, limit=limit * RAW_PER_MESSAGE, offset_date=day_end(until)
             )
-            found = await _collect(
+            found, _, _ = await _collect(
                 stream,
                 limit,
-                lambda m: first_day is not None and m.date.astimezone(UTC).date() < first_day,
+                lambda m: since is not None and m.date.astimezone(UTC).date() < since,
             )
             out = [self._map(m, m.chat_id) for m in found]
         log.info("search_global n=%d", len(out))
@@ -382,20 +399,11 @@ class TelethonGateway(Gateway):
             target = self._map(found[0], chat_id)
             # In a forum the context stays inside the target's topic.
             topic = target.topic_id if self._chats[chat_id].is_forum else None
-            older = [
-                m
-                async for m in client.iter_messages(
-                    peer, limit=before, offset_id=message_id, reply_to=topic
-                )
-                if is_plain(m)
-            ]
-            newer = [
-                m
-                async for m in client.iter_messages(
-                    peer, limit=after, min_id=message_id, reverse=True, reply_to=topic
-                )
-                if is_plain(m)
-            ]
+            # A zero-width side sends nothing: Telethon would still ask, to learn the total.
+            older = await _plain(client, before, peer, offset_id=message_id, reply_to=topic)
+            newer = await _plain(
+                client, after, peer, min_id=message_id, reverse=True, reply_to=topic
+            )
             earlier = [self._map(m, chat_id) for m in reversed(older)]
             later = [self._map(m, chat_id) for m in newer]
         log.info("around chat=%s before=%d after=%d", chat_id, len(earlier), len(later))

@@ -155,6 +155,16 @@ async def test_around_order_and_topic_confinement(gw: TelethonGateway):
     assert (context_calls[1]["min_id"], context_calls[1]["reverse"]) == (42, True)
 
 
+async def test_around_with_zero_window_fetches_only_the_target(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["ids"] = [_m(42, topic=7)]
+    before, target, after = await gw.around(FORUM_ID, 42, before=0, after=0)
+    assert (before, target.id, after) == ([], 42, [])
+    assert [c for c in stub.iter_calls if "ids" not in c] == []
+    await gw.around(FORUM_ID, 42, before=2, after=0)
+    assert [c.get("reverse") for c in stub.iter_calls if "ids" not in c] == [None]
+
+
 async def test_around_missing_target(gw: TelethonGateway):
     with pytest.raises(GatewayError, match="No message 42"):
         await gw.around(FORUM_ID, 42, before=1, after=1)
@@ -194,23 +204,6 @@ async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
     assert hits[0].topic_id == 7
 
 
-async def test_search_in_chat_naive_datetime_is_utc(gw: TelethonGateway):
-    stub = _stub(gw)
-    stub.results.append(SimpleNamespace(messages=[], users=[], chats=[]))
-    await gw.search_in_chat(
-        FORUM_ID,
-        "x",
-        topic=None,
-        sender=None,
-        since=datetime(2026, 10, 1, 23, 0),
-        until=datetime(2026, 10, 2, 1, 0),
-        limit=5,
-    )
-    request = stub.requests[0]
-    assert request.min_date == datetime(2026, 10, 1, tzinfo=UTC)
-    assert request.max_date == datetime(2026, 10, 3, tzinfo=UTC)
-
-
 async def test_history_naive_bounds_are_utc(gw: TelethonGateway):
     stub = _stub(gw)
     stub.messages["plain"] = [_m(3), _service(2), _m(1)]
@@ -222,7 +215,8 @@ async def test_history_naive_bounds_are_utc(gw: TelethonGateway):
         until=datetime(2026, 10, 30),
         limit=10,
     )
-    assert [m.id for m in out] == [3, 1]
+    assert [m.id for m in out.messages] == [3, 1]
+    assert (out.next_before_id, out.stopped_early) == (None, False)  # the stream ended
     call = stub.iter_calls[-1]
     assert call["offset_date"] == datetime(2026, 10, 30, tzinfo=UTC)
 
@@ -335,15 +329,23 @@ async def test_history_fills_the_page_past_service_messages(gw: TelethonGateway)
     stub = _stub(gw)
     stub.messages["plain"] = [_m(10), _service(9), _m(8), _service(7), _m(6), _m(5), _m(4)]
     out = await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=3)
-    assert [m.id for m in out] == [10, 8, 6]
-    assert stub.iter_calls[-1]["limit"] is None
+    assert [m.id for m in out.messages] == [10, 8, 6]
+    assert (out.next_before_id, out.stopped_early) == (6, False)  # a full page: continue below
+    assert stub.iter_calls[-1]["limit"] == 12  # bounded: `None` would sleep 1 s per chunk
 
 
-async def test_history_safety_stop_returns_what_it_has(gw: TelethonGateway):
+async def test_history_limit_bounds_the_stream(gw: TelethonGateway):
+    await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=None, limit=100)
+    assert _stub(gw).iter_calls[-1]["limit"] == 400
+
+
+async def test_history_safety_stop_keeps_the_cursor(gw: TelethonGateway):
     stub = _stub(gw)
-    stub.messages["plain"] = [_m(30), *(_service(i) for i in range(29, 10, -1)), _m(10)]
+    stub.messages["plain"] = [_m(40), *(_service(i) for i in range(39, 9, -1)), _m(9), _m(8)]
     out = await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=2)
-    assert [m.id for m in out] == [30]  # stopped after 2 * 4 raw messages
+    assert [m.id for m in out.messages] == [40]  # stopped after 2 * 4 raw messages
+    assert out.stopped_early is True
+    assert out.next_before_id == 33  # the last raw message scanned: the next page starts below
 
 
 async def test_history_stops_at_since(gw: TelethonGateway):
@@ -357,7 +359,7 @@ async def test_history_stops_at_since(gw: TelethonGateway):
         until=WHEN,
         limit=5,
     )
-    assert out == []
+    assert (out.messages, out.next_before_id, out.stopped_early) == ([], None, False)
 
 
 async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway):
@@ -365,7 +367,7 @@ async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway)
     stub.messages["plain"] = [_m(10), _service(9), _m(8), _m(7)]
     out = await gw.search_global("x", since=None, until=None, limit=2)
     assert [m.id for m in out] == [10, 8]
-    assert stub.iter_calls[-1]["limit"] is None
+    assert stub.iter_calls[-1]["limit"] == 8
     later = await gw.search_global("x", since=date(2030, 1, 1), until=None, limit=2)
     assert later == []
 

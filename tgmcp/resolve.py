@@ -5,19 +5,22 @@ import time
 from collections.abc import Callable, Sequence
 
 from tgmcp.gateway import Gateway
-from tgmcp.models import Chat
+from tgmcp.models import Chat, quoted
 
 
 class Ambiguous(Exception):  # noqa: N818 - name fixed by the interface
     def __init__(self, ref: str, candidates: list[Chat]) -> None:
         self.candidates = candidates
-        listed = ", ".join(f"{c.title} ({c.id})" for c in candidates)
-        super().__init__(f"Several chats match {ref!r}: {listed}. Call again with the id.")
+        # Titles are chat content: quoted and cut, after the id the model should use.
+        listed = ", ".join(f"{c.id} {quoted(c.title)}" for c in candidates)
+        super().__init__(f"Several chats match {quoted(ref)}: {listed}. Call again with the id.")
 
 
 class NotFound(Exception):  # noqa: N818 - name fixed by the interface
     def __init__(self, ref: str, total: int) -> None:
-        super().__init__(f"No chat matches {ref!r} among your {total} chats (archived included).")
+        super().__init__(
+            f"No chat matches {quoted(ref)} among your {total} chats (archived included)."
+        )
 
 
 class Directory:
@@ -27,10 +30,15 @@ class Directory:
         hidden: Sequence[str],
         refresh_after_s: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
+        miss_refresh_after_s: float = 10.0,
     ) -> None:
+        """The dialog list is loaded again when it is older than `refresh_after_s`, and on a
+        lookup that finds nothing when it is older than `miss_refresh_after_s` (a chat joined a
+        moment ago), so a run of misses costs at most one reload per that many seconds."""
         self._gateway = gateway
         self._hidden = {h.strip().lower() for h in hidden}
         self._refresh_after_s = refresh_after_s
+        self._miss_refresh_after_s = miss_refresh_after_s
         self._clock = clock
         self._cache: list[Chat] | None = None
         self._loaded_at = 0.0
@@ -59,9 +67,8 @@ class Directory:
 
     async def resolve(self, ref: str) -> Chat:
         chats = await self.chats()
-        stale_at = self._loaded_at
         found = _match(ref, chats)
-        if found is None and self._clock() - stale_at > self._refresh_after_s:
+        if found is None and self._clock() - self._loaded_at > self._miss_refresh_after_s:
             chats = await self._load()
             found = _match(ref, chats)
         if found is None:
@@ -84,6 +91,8 @@ def _exact_ref(text: str, chats: list[Chat]) -> Chat | None:
 
 def _match(ref: str, chats: list[Chat]) -> Chat | None:
     text = ref.strip()
+    if not text:  # a deleted account has an empty title; a blank ref names nothing
+        return None
     found = _exact_ref(text, chats)
     if found is not None:
         return found
