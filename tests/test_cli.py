@@ -1,3 +1,4 @@
+import getpass
 import json
 from pathlib import Path
 
@@ -5,7 +6,7 @@ import pytest
 
 from tests.factories import make_chat, make_session_string
 from tests.fake_gateway import FakeGateway
-from tgmcp import cli, config, secrets
+from tgmcp import cli, config, logging_setup, secrets
 from tgmcp.config import Settings
 from tgmcp.gateway import MIGRATE, ApiKeyError, GatewayError
 from tgmcp.models import Account
@@ -49,7 +50,7 @@ def test_serve_without_credentials_exits_2(env, capsys, monkeypatch):
 
 
 def test_serve_with_only_old_files_asks_to_move_them(env, capsys, monkeypatch):
-    monkeypatch.setattr(cli.logging_setup, "configure", lambda path: path)
+    monkeypatch.setattr(logging_setup, "configure", lambda path: path)
     (env / "telegram.session").write_bytes(b"old login")
     assert cli.main(["serve"]) == 2
     out, err = capsys.readouterr()
@@ -87,6 +88,7 @@ def test_whoami_prints_account_counts_and_hidden(env, capsys, monkeypatch):
     assert lines[-1] == f"home: {env}"
     assert not [line for line in lines if line.startswith("warning:")]
     assert "close" in fake.calls
+    assert fake.calls.count("dialogs") == 1  # one load serves the counts and the hidden list
 
 
 def test_whoami_warns_when_secrets_are_not_encrypted(env, capsys, monkeypatch):
@@ -120,7 +122,7 @@ def test_login_prompts_for_missing_credentials(env, capsys, monkeypatch):
     monkeypatch.delenv("TGMCP_API_ID")
     monkeypatch.delenv("TGMCP_API_HASH")
     monkeypatch.setattr("builtins.input", lambda prompt="": "42")
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "hash")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "hash")
 
     async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         assert (settings.api_id, api_hash) == (42, "hash")
@@ -140,7 +142,7 @@ def test_login_takes_the_hash_from_the_secrets_file(env, monkeypatch):
     def no_prompt(prompt: str = "") -> str:
         raise AssertionError(prompt)
 
-    monkeypatch.setattr(cli.getpass, "getpass", no_prompt)
+    monkeypatch.setattr(getpass, "getpass", no_prompt)
     seen: list[str] = []
 
     async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
@@ -173,6 +175,22 @@ def test_login_moves_old_clear_text_files(env, capsys, monkeypatch):
     saved = json.loads((env / "config.json").read_text(encoding="utf-8"))
     assert saved == {"api_id": 1, "hidden_chats": ["@x"]}
     assert "removed the old clear-text files" in capsys.readouterr().out
+
+
+def test_login_with_old_files_in_use_still_succeeds(env, capsys, monkeypatch):
+    (env / "telegram.session").write_bytes(b"old login")
+    monkeypatch.setattr(cli, "interactive_login", _logged_in)
+
+    def in_use(settings: Settings) -> None:
+        raise PermissionError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(cli, "remove_legacy_files", in_use)
+    assert cli.main(["login"]) == 0
+    out, err = capsys.readouterr()
+    assert "logged in as Alex" in out
+    assert "removed" not in out
+    assert "could not remove the old clear-text files" in err
+    assert "Traceback" not in err
 
 
 def test_failed_login_keeps_old_files(env, monkeypatch):
@@ -235,7 +253,7 @@ def test_serve_runs_server_and_returns_0(env, monkeypatch):
 
     monkeypatch.setattr(cli, "factory", lambda settings: FakeGateway([], {}))
     monkeypatch.setattr(cli, "build_server", lambda make, settings: FakeServer())
-    monkeypatch.setattr(cli.logging_setup, "configure", lambda path: None)
+    monkeypatch.setattr(logging_setup, "configure", lambda path: None)
     assert cli.main(["serve"]) == 0
     assert ran == [True]
 
@@ -273,7 +291,7 @@ def test_login_empty_hash_reprompts_then_gives_up(env, capsys, monkeypatch):
         asked.append(prompt)
         return ""
 
-    monkeypatch.setattr(cli.getpass, "getpass", empty)
+    monkeypatch.setattr(getpass, "getpass", empty)
     assert cli.main(["login"]) == 1
     assert len(asked) == 3
     assert "cannot be empty" in capsys.readouterr().err
@@ -297,7 +315,7 @@ def test_login_without_terminal_input_for_the_hash_exits_1(env, capsys, monkeypa
     def eof(prompt: str = "") -> str:
         raise EOFError
 
-    monkeypatch.setattr(cli.getpass, "getpass", eof)
+    monkeypatch.setattr(getpass, "getpass", eof)
     assert cli.main(["login"]) == 1
     assert "interactive terminal" in capsys.readouterr().err
 
@@ -320,7 +338,7 @@ def test_login_reset_asks_again_and_saves_new_credentials(env, monkeypatch):
         '{"api_id": 1, "api_hash": "old", "hidden_chats": ["@x"]}', encoding="utf-8"
     )
     prompts = _no_terminal_input(monkeypatch, ["77"])
-    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "new")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "new")
     seen: list[tuple[int, str]] = []
 
     async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
@@ -348,7 +366,7 @@ def test_login_reset_asks_for_the_hash_kept_in_the_secrets_file(env, monkeypatch
         hashes.append(prompt)
         return "fresh"
 
-    monkeypatch.setattr(cli.getpass, "getpass", ask)
+    monkeypatch.setattr(getpass, "getpass", ask)
     seen: list[tuple[str, bool]] = []
 
     async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
@@ -394,6 +412,6 @@ def test_login_and_serve_restrict_a_new_home(tmp_path, monkeypatch):
     assert cli.main(["login"]) == 0
     serve_home = tmp_path / "serve"
     monkeypatch.setenv("TGMCP_HOME", str(serve_home))
-    monkeypatch.setattr(cli.logging_setup, "configure", lambda path: path)
+    monkeypatch.setattr(logging_setup, "configure", lambda path: path)
     assert cli.main(["serve"]) == 2  # no secrets file
     assert restricted == [login_home, serve_home]

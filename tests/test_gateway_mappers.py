@@ -14,7 +14,7 @@ WHEN = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
 def _channel(cid: int = 1005, **kw: object) -> types.Channel:
-    title = str(kw.pop("title", "Expats WAW"))
+    title = str(kw.pop("title", "Expats Hub"))
     return types.Channel(id=cid, title=title, photo=None, date=WHEN, access_hash=9, **kw)
 
 
@@ -62,7 +62,7 @@ def test_dialog_of_forum_supergroup():
     assert (chat.kind, chat.is_forum, chat.username, chat.members) == ("group", True, "expats", 40)
     assert chat.archived is True
     assert chat.last_message_at == WHEN
-    assert chat.title == "Expats WAW"
+    assert chat.title == "Expats Hub"
 
 
 def test_dialog_of_broadcast_channel_and_user():

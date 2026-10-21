@@ -50,7 +50,7 @@ def seed() -> FakeGateway:
             discussion_chat_id=-1004,
         ),
         make_chat(-1004, title="Auto News chat"),
-        make_chat(-1005, title="Expats WAW", is_forum=True),
+        make_chat(-1005, title="Expats Hub", is_forum=True),
         make_chat(-1006, title="Old", archived=True),
         make_chat(-1007, title="Private"),
     ]
@@ -89,7 +89,7 @@ def make_client(seed: FakeGateway, settings: Settings) -> Callable[[], Client]:
     context to exit in the task that entered it, and pytest runs teardown elsewhere.
     Tests use the `call` fixture or enter a client themselves.
     """
-    return lambda: Client(build_server(lambda _s: seed, settings))
+    return lambda: Client(build_server(seed, settings))
 
 
 @pytest.fixture

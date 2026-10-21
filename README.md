@@ -59,7 +59,7 @@ Replace `C:\path\to\telegram-mcp` with the folder you cloned into (here and in e
 
    cmd.exe: `.venv\Scripts\tgmcp login`. It asks, in this order:
    - `API id:` and `API hash:` (first time only). The hash is not shown while you type; paste it and press Enter. The API id is saved in `config.json`; the hash is saved only in the encrypted `secrets.bin`.
-   - Your phone number, with the country code, for example `+48 600 123 456`.
+   - Your phone number, with the country code, for example `+1 555 0100`.
    - The code. It arrives as a message **inside the Telegram app** (from the "Telegram" service chat), not by SMS.
    - Your two-step verification password, only if you have set one in Telegram.
 

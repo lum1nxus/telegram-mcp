@@ -1,5 +1,6 @@
 """Settings, the data folder and owner-only permissions."""
 
+import functools
 import json
 import os
 import subprocess
@@ -114,13 +115,27 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     )
 
 
-def _owner() -> str:
-    """The Windows account name for icacls; `whoami` when USERNAME is empty."""
-    user = os.environ.get("USERNAME", "").strip()
-    if user:
-        return user
-    found = subprocess.run(["whoami"], capture_output=True, text=True, encoding="utf-8", check=True)
-    return found.stdout.strip()
+def _system_tool(name: str) -> str:
+    """A Windows tool by full path: Git Bash puts its own `whoami` first on PATH."""
+    return str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / name)
+
+
+@functools.cache
+def _owner_sid() -> str:
+    """The current user's SID (`S-1-5-21-...`): icacls takes it as `*SID`, which works where an
+    account name would not resolve (a renamed account, an empty or wrong USERNAME)."""
+    found = subprocess.run(
+        [_system_tool("whoami.exe"), "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    sid = found.stdout.strip().rsplit(",", 1)[-1].strip('"')
+    if not sid.startswith("S-1-"):
+        raise subprocess.CalledProcessError(0, found.args, found.stdout, found.stderr)
+    return sid
 
 
 def restrict_to_owner(path: Path) -> None:
@@ -129,8 +144,15 @@ def restrict_to_owner(path: Path) -> None:
         # The inheritance flags (OI)(CI) are for folders; on a file they leave an empty ACL.
         rights = "(OI)(CI)F" if path.is_dir() else "F"
         subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{_owner()}:{rights}"],
+            [
+                _system_tool("icacls.exe"),
+                str(path),
+                "/inheritance:r",
+                "/grant:r",
+                f"*{_owner_sid()}:{rights}",
+            ],
             encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=True,
         )

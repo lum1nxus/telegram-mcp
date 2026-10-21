@@ -16,6 +16,7 @@ from tgmcp.gateway import (
     IDLE_SECONDS,
     MIGRATE,
     RAW_PER_MESSAGE,
+    UNSEEN_USER,
     Gateway,
     GatewayError,
     History,
@@ -52,7 +53,10 @@ class _Client(Protocol):
 
     async def get_me(self) -> Any: ...
 
-    async def get_input_entity(self, peer: Any) -> Any: ...
+    @property
+    def session(self) -> Any:
+        """The in-memory session; it caches every user and chat a response carried."""
+        ...
 
     def iter_dialogs(self, **kwargs: Any) -> AsyncIterator[Any]: ...
 
@@ -315,19 +319,24 @@ class TelethonGateway(Gateway):
         log.info("history chat=%s n=%d early=%s", chat_id, len(out), early)
         return History(out, cursor, early)
 
-    async def _input_user(self, client: _Client, value: str | None) -> Any:
+    @staticmethod
+    def _input_user(client: _Client, value: str | None) -> Any:
+        """A user this process has already seen: in the dialog list, or as the sender or a
+        mention of a message a tool loaded (Telethon's in-memory session keeps every user a
+        response carried). Never a network lookup: resolving a username is one of Telegram's
+        most flood-limited requests, and a loop over names would block the account."""
         if value is None:
             return None
         numeric = re.fullmatch(r"\d+", value) is not None
         if not numeric and re.fullmatch(r"@\w+", value) is None:
             raise GatewayError("sender must be a user id or @username")
         try:
-            # Resolved now: an id this process has not seen would fail later, inside Telethon.
-            return await client.get_input_entity(int(value) if numeric else value)
-        except ValueError as exc:  # Telethon could not resolve the id or username
-            raise GatewayError(
-                "Unknown sender: pass a user id or @username from this chat."
-            ) from exc
+            found = client.session.get_input_entity(int(value) if numeric else value)
+        except ValueError as exc:  # not in the session's cache
+            raise GatewayError(UNSEEN_USER) from exc
+        if not isinstance(found, types.InputPeerUser):  # a chat or channel with that number
+            raise GatewayError(UNSEEN_USER)
+        return found
 
     async def search_in_chat(  # noqa: PLR0913 - signature fixed by the interface
         self,
@@ -357,7 +366,7 @@ class TelethonGateway(Gateway):
                     max_id=0,
                     min_id=0,
                     hash=0,
-                    from_id=await self._input_user(client, sender),
+                    from_id=self._input_user(client, sender),
                     top_msg_id=topic,
                 )
             )

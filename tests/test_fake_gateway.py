@@ -1,6 +1,6 @@
 import pytest
 
-from tgmcp.gateway import GatewayError
+from tgmcp.gateway import UNSEEN_USER, GatewayError
 
 
 async def test_search_matches_word_prefixes_not_fragments(seed):
@@ -49,7 +49,7 @@ async def test_sender_username_maps_to_user_id(seed):
         -1001, "", topic=None, sender="@nora", since=None, until=None, limit=5
     )
     assert [m.id for m in hits] == [1]
-    with pytest.raises(GatewayError, match=r"No user @x in your chats."):
+    with pytest.raises(GatewayError, match="Unknown sender"):
         await seed.search_in_chat(
             -1001, "", topic=None, sender="@x", since=None, until=None, limit=5
         )
@@ -60,3 +60,43 @@ async def test_empty_query_returns_everything_newest_first(seed):
         -1001, "", topic=None, sender=None, since=None, until=None, limit=3
     )
     assert [m.id for m in hits] == [120, 119, 118]
+
+
+async def test_sender_must_have_been_seen(seed):
+    with pytest.raises(GatewayError) as caught:
+        await seed.search_in_chat(
+            -1001, "", topic=None, sender="333", since=None, until=None, limit=5
+        )
+    assert str(caught.value) == UNSEEN_USER
+    await seed.history(-1001, topic=None, before_id=None, since=None, until=None, limit=5)
+    hits = await seed.search_in_chat(
+        -1001, "", topic=None, sender="333", since=None, until=None, limit=2
+    )
+    assert {m.sender_id for m in hits} == {333}
+
+
+async def test_history_until_is_exclusive(seed):
+    newest = max(seed.messages[-1001], key=lambda m: m.id)
+    page = await seed.history(
+        -1001, topic=None, before_id=None, since=None, until=newest.date, limit=1
+    )
+    assert [m.id for m in page.messages] == [newest.id - 1]
+
+
+async def test_service_messages_are_skipped_and_stop_a_page_early(seed):
+    seed.service[-1001] = set(range(100, 120))
+    page = await seed.history(-1001, topic=None, before_id=None, since=None, until=None, limit=2)
+    assert [m.id for m in page.messages] == [120]
+    assert (page.next_before_id, page.stopped_early) == (113, True)
+    with pytest.raises(GatewayError, match="No message 110"):
+        await seed.around(-1001, 110, before=1, after=1)
+    before, _, after = await seed.around(-1001, 99, before=2, after=2)
+    assert ([m.id for m in before], after) == ([97, 98], [])
+
+
+async def test_forum_context_stays_in_the_topic(seed):
+    before, target, after = await seed.around(-1005, 6, before=3, after=3)
+    assert target.topic_id == 7
+    assert {m.topic_id for m in before + after} == {7}
+    assert [m.id for m in before] == []
+    assert [m.id for m in after] == [7, 8, 9]

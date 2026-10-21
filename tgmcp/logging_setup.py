@@ -9,6 +9,7 @@ from pathlib import Path
 from tgmcp.config import LIBRARY_LOGGER
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+MCP_LOGGER = "mcp"
 KEEP_DAYS = 7
 _installed: list[logging.Handler] = []
 
@@ -48,5 +49,8 @@ def configure(log_path: Path, level: str = "INFO") -> Path:
         handler.setFormatter(formatter)
         root.addHandler(handler)
         _installed.append(handler)
-    logging.getLogger(LIBRARY_LOGGER).setLevel(logging.WARNING)
+    for library in (LIBRARY_LOGGER, MCP_LOGGER):
+        # mcp logs every failed tool call at INFO with its error sentence, which may quote the
+        # model's arguments; Telethon logs network chatter. Warnings and errors still come.
+        logging.getLogger(library).setLevel(logging.WARNING)
     return path

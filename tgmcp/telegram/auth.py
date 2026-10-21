@@ -9,7 +9,7 @@ from telethon import errors, utils
 from telethon.sessions import SQLiteSession, StringSession
 
 from tgmcp.config import Settings
-from tgmcp.gateway import ApiKeyError, Busy, GatewayError, NotLoggedIn
+from tgmcp.gateway import NO_TERMINAL, ApiKeyError, Busy, GatewayError, NotLoggedIn
 from tgmcp.models import Account
 from tgmcp.secrets import NoSecrets, SecretsError, read_secrets, write_secrets
 from tgmcp.telegram.client import AuthClient, ReadOnlyViolation
@@ -58,7 +58,7 @@ def _auth_client(settings: Settings, session: str | None, api_hash: str) -> Any:
     return AuthClient(StringSession(session), settings.api_id, api_hash, receive_updates=False)
 
 
-async def _console_login(  # noqa: C901 - one except per case
+async def _console_login(  # noqa: C901, PLR0912 - one except per case
     settings: Settings, api_hash: str, seed: str | None
 ) -> tuple[Any, str]:
     """Telethon's console login on an in-memory session: the key never touches the disk in
@@ -72,6 +72,8 @@ async def _console_login(  # noqa: C901 - one except per case
         login: str = StringSession.save(client.session)
     except ReadOnlyViolation as e:  # before RuntimeError, which it is
         raise refused(e) from e
+    except EOFError as e:  # Telethon asks with input(); stdin is closed or not a terminal
+        raise GatewayError(NO_TERMINAL) from e
     except errors.ApiIdInvalidError as e:
         raise ApiKeyError(
             "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
@@ -102,7 +104,7 @@ async def _console_login(  # noqa: C901 - one except per case
 
 
 _NO_PERMISSIONS = (
-    "The login was saved but its file permissions could not be set: "
+    "The login was not saved because its file permissions could not be set: "
     "run `tgmcp login` again or check icacls."
 )
 
@@ -116,7 +118,7 @@ async def interactive_login(settings: Settings, api_hash: str, *, reuse: bool = 
         raise GatewayError("Telegram did not finish the login: run `tgmcp login` again.")
     try:
         write_secrets(settings.secrets_path, api_hash, login)
-    except subprocess.CalledProcessError as e:  # icacls failed after the file was written
+    except subprocess.CalledProcessError as e:  # icacls failed; the old file is unchanged
         raise GatewayError(_NO_PERMISSIONS) from e
     except OSError as e:
         raise GatewayError(f"Could not save the login in {settings.secrets_path}.") from e

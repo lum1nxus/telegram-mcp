@@ -19,14 +19,13 @@ from tgmcp.config import (
     remove_legacy_files,
     save_credentials,
 )
-from tgmcp.gateway import MIGRATE, ApiKeyError, GatewayError, NotLoggedIn
+from tgmcp.gateway import MIGRATE, NO_TERMINAL, ApiKeyError, GatewayError, NotLoggedIn
 from tgmcp.resolve import Directory
 from tgmcp.server import build_server
 from tgmcp.telegram import end_session, factory, interactive_login
 
 ATTEMPTS = 3
 PLAIN_WARNING = "warning: secrets are not encrypted on this platform (file permissions only)"
-NO_TERMINAL = "No terminal input: run `tgmcp login` in an interactive terminal."
 
 
 def _say(text: str) -> None:
@@ -101,8 +100,15 @@ def _login(reset: bool = False) -> int:
         return 1
     _say(f"logged in as {account.name}")
     if legacy_files(settings):
-        remove_legacy_files(settings)
-        _say("removed the old clear-text files")
+        try:
+            remove_legacy_files(settings)
+        except OSError:  # an older tgmcp process still holds telegram.session open
+            _complain(
+                f"could not remove the old clear-text files in {settings.home} (in use): "
+                "delete them after closing older tgmcp processes"
+            )
+        else:
+            _say("removed the old clear-text files")
     return 0
 
 
@@ -111,9 +117,10 @@ async def _whoami(settings: Settings) -> int:
     try:
         me = await gateway.me()
         dialogs = await gateway.dialogs()
-        visible = await Directory(gateway, settings.hidden_chats).chats()
     finally:
         await gateway.close()
+    directory = Directory(gateway, settings.hidden_chats)
+    visible = [c for c in dialogs if not directory.is_hidden(c)]
     handle = f" (@{me.username})" if me.username else ""
     archived = sum(1 for c in visible if c.archived)
     hidden = len(dialogs) - len(visible)
@@ -152,7 +159,7 @@ def _serve() -> int:
     except (NotLoggedIn, ConfigError) as exc:
         _complain(str(exc))
         return 2
-    build_server(lambda _settings: gateway, settings).run()  # Ctrl-C is handled in main
+    build_server(gateway, settings).run()  # Ctrl-C is handled in main
     return 0
 
 

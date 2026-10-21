@@ -19,8 +19,9 @@ from tests.factories import make_session_string
 from tests.test_gateway_mappers import WHEN, _channel, _dialog
 from tgmcp import config, secrets
 from tgmcp.config import Settings
-from tgmcp.gateway import ApiKeyError, Busy, GatewayError
+from tgmcp.gateway import NO_TERMINAL, UNSEEN_USER, ApiKeyError, Busy, GatewayError
 from tgmcp.telegram import auth
+from tgmcp.telegram.client import ReadOnlyViolation
 from tgmcp.telegram.live import TelethonGateway
 
 FORUM_ID = -1000000001005
@@ -53,7 +54,10 @@ class StubClient:
         self.results: list[Any] = []
         self.messages: dict[str, list[Any]] = {"ids": [], "before": [], "after": [], "plain": []}
         self.me_error: Exception | None = None
-        self.entity_lookups: list[Any] = []
+        # A real in-memory session, as the gateway's client has: it knows Nora (333).
+        self.session = StringSession()
+        nora = types.User(id=333, first_name="Nora", username="Nora", access_hash=1)
+        self.session.process_entities(types.contacts.ResolvedPeer(types.PeerUser(333), [], [nora]))
         self._self_id = 1
         self._mb_entity_cache = SimpleNamespace(get=lambda _id: None)
         entity = _channel(megagroup=True, forum=True, username="expats")
@@ -77,10 +81,6 @@ class StubClient:
         if self.me_error is not None:
             raise self.me_error
         return types.User(id=100, first_name="Alex", username="alex", access_hash=1)
-
-    async def get_input_entity(self, value: Any) -> Any:
-        self.entity_lookups.append(value)
-        return types.InputPeerUser(user_id=333, access_hash=1)
 
     async def iter_dialogs(self, **_kw: Any) -> AsyncIterator[Any]:
         self.dialog_loads += 1
@@ -172,14 +172,13 @@ async def test_around_missing_target(gw: TelethonGateway):
 
 async def test_input_user_parsing(gw: TelethonGateway):
     stub = _stub(gw)
-    assert await gw._input_user(stub, None) is None
-    by_id = await gw._input_user(stub, "333")
-    peer = await gw._input_user(stub, "@nora")
-    assert isinstance(by_id, types.InputPeerUser)
-    assert isinstance(peer, types.InputPeerUser)
-    assert stub.entity_lookups == [333, "@nora"]  # a numeric id is resolved now, as an int
+    nora = types.InputPeerUser(user_id=333, access_hash=1)
+    assert gw._input_user(stub, None) is None
+    assert gw._input_user(stub, "333") == nora
+    assert gw._input_user(stub, "@NORA") == nora  # usernames are case-insensitive
     with pytest.raises(GatewayError, match="sender must be a user id or @username"):
-        await gw._input_user(stub, "Nora K")
+        gw._input_user(stub, "Nora K")
+    assert stub.requests == []  # resolved from what the session has seen, never the network
 
 
 async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
@@ -230,6 +229,11 @@ async def test_flood_wait_becomes_busy(gw: TelethonGateway):
     assert gw._in_flight == 0
 
 
+def _guard_state(gw: TelethonGateway) -> tuple[object, object]:
+    """Read afresh: mypy keeps an attribute narrowed across an await."""
+    return gw._guard, gw._guard_task
+
+
 async def test_idle_during_request_keeps_connection(gw: TelethonGateway):
     stub = _stub(gw)
     async with gw._session():
@@ -240,7 +244,7 @@ async def test_idle_during_request_keeps_connection(gw: TelethonGateway):
     await gw._on_idle()
     assert stub.disconnects == 1
     assert gw._ready is False
-    assert (gw._guard, gw._guard_task) == (None, None)
+    assert _guard_state(gw) == (None, None)
     await asyncio.sleep(0)
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
     assert pending == []
@@ -290,15 +294,22 @@ async def test_service_message_target_is_missing(gw: TelethonGateway):
         await gw.around(FORUM_ID, 42, before=1, after=1)
 
 
-async def test_unresolvable_username_is_unknown_sender(gw: TelethonGateway):
+@pytest.mark.parametrize("sender", ["@ghost", "999"])
+async def test_unseen_sender_is_unknown_without_a_request(gw: TelethonGateway, sender: str):
     stub = _stub(gw)
+    with pytest.raises(GatewayError) as caught:
+        gw._input_user(stub, sender)
+    assert str(caught.value) == UNSEEN_USER
+    assert stub.requests == []
 
-    async def unknown(value: str) -> Any:
-        raise ValueError(f"Cannot find any entity corresponding to {value}")
 
-    stub.get_input_entity = unknown  # type: ignore[method-assign]
-    with pytest.raises(GatewayError, match="Unknown sender: pass a user id or @username"):
-        await gw._input_user(stub, "@ghost")
+async def test_a_channel_number_is_not_a_sender(gw: TelethonGateway):
+    stub = _stub(gw)
+    news = _channel(4040, broadcast=True)
+    stub.session.process_entities(types.contacts.ResolvedPeer(types.PeerChannel(4040), [news], []))
+    with pytest.raises(GatewayError) as caught:
+        gw._input_user(stub, "4040")
+    assert str(caught.value) == UNSEEN_USER
 
 
 async def test_mapping_bug_is_internal_error_with_traceback(
@@ -310,19 +321,10 @@ async def test_mapping_bug_is_internal_error_with_traceback(
     with pytest.raises(GatewayError) as caught:
         await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=5)
     assert str(caught.value) == "Internal error in the Telegram gateway: ValidationError."
-    record = next(r for r in caplog.records if r.message == "internal gateway error")
-    assert record.exc_info is not None
-
-
-async def test_unseen_numeric_sender_is_unknown_sender(gw: TelethonGateway):
-    stub = _stub(gw)
-
-    async def unknown(value: Any) -> Any:
-        raise ValueError(f"Could not find the input entity for {value}")
-
-    stub.get_input_entity = unknown  # type: ignore[method-assign]
-    with pytest.raises(GatewayError, match="Unknown sender: pass a user id or @username"):
-        await gw._input_user(stub, "999")
+    record = next(r for r in caplog.records if r.message.startswith("internal gateway error"))
+    assert record.message.startswith("internal gateway error ValidationError\n")
+    assert "in history" in record.message  # the stack is there
+    assert "input_value" not in record.message  # the exception message is not
 
 
 async def test_history_fills_the_page_past_service_messages(gw: TelethonGateway):
@@ -498,6 +500,20 @@ async def test_login_whose_permissions_fail_says_so(login_settings: Settings, mo
 
     monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
     with pytest.raises(GatewayError, match="file permissions could not be set"):
+        await auth.interactive_login(login_settings, "h")
+
+
+async def test_login_without_a_terminal_says_so(login_settings: Settings):
+    LoginClient.error = EOFError()  # Telethon's input() on a closed stdin
+    with pytest.raises(GatewayError) as caught:
+        await auth.interactive_login(login_settings, "h")
+    assert str(caught.value) == NO_TERMINAL
+    assert _files(login_settings.home) == []
+
+
+async def test_login_blocked_by_the_guard_is_not_three_wrong_codes(login_settings: Settings):
+    LoginClient.error = ReadOnlyViolation("SendMessageRequest")  # a RuntimeError too
+    with pytest.raises(GatewayError, match="refused SendMessageRequest"):
         await auth.interactive_login(login_settings, "h")
 
 

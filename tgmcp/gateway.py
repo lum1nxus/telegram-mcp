@@ -32,6 +32,13 @@ MIGRATE = (
 )
 
 
+NO_TERMINAL = "No terminal input: run `tgmcp login` in an interactive terminal."
+UNSEEN_USER = (
+    "Unknown sender: pass a sender_id seen in this chat's messages (get_messages) "
+    "or the @username of a user in your chats."
+)
+
+
 class ApiKeyError(GatewayError):
     """Telegram rejected the API id or hash, so the saved ones are not worth keeping."""
 

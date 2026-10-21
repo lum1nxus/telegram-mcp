@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -84,19 +85,36 @@ def test_forget_credentials_keeps_other_settings(tmp_path):
     config.forget_credentials(tmp_path / "missing")  # no file: nothing to do
 
 
+def _aces(path: Path) -> list[str]:
+    """The access entries icacls lists for `path`, one per line."""
+    shown = subprocess.run(
+        [config._system_tool("icacls.exe"), str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    ).stdout
+    body = shown.replace(str(path), "", 1)
+    return [line.strip() for line in body.splitlines() if ":(" in line]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="icacls is Windows-only")
-@pytest.mark.parametrize("username", ["from-env", ""])
-def test_restrict_to_owner_keeps_the_owner_able_to_read(tmp_path, monkeypatch, username):
-    if not username:
-        monkeypatch.setenv("USERNAME", "")  # falls back to `whoami`
+@pytest.mark.parametrize("username", ["somebody-else", ""])
+def test_restrict_to_owner_leaves_exactly_the_owner(tmp_path, monkeypatch, username):
+    monkeypatch.setenv("USERNAME", username)  # the grant uses the SID, not this name
     folder = tmp_path / "home"
     folder.mkdir()
     config.restrict_to_owner(folder)
-    secret = folder / "telegram.session"
+    secret = folder / "secrets.bin"
     secret.write_text("key", encoding="utf-8")
     config.restrict_to_owner(secret)
     assert secret.read_text(encoding="utf-8") == "key"
-    assert [p.name for p in folder.iterdir()] == ["telegram.session"]
+    for path in (folder, secret):
+        aces = _aces(path)
+        assert len(aces) == 1, aces
+        assert "(I)" not in aces[0]  # nothing inherited from the parent folder
+        assert aces[0].endswith("F)")
 
 
 def _settings(home: Path) -> config.Settings:

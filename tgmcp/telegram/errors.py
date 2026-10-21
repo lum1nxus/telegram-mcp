@@ -1,6 +1,7 @@
 """Telethon errors -> one sentence for the model."""
 
 import logging
+import traceback
 
 from telethon import errors
 
@@ -51,6 +52,8 @@ def map_error(e: Exception) -> GatewayError:
         return GatewayError(f"Telegram refused the request: {type(e).__name__}.")
     if isinstance(e, OSError):  # network errors and timeouts
         return GatewayError(f"Could not talk to Telegram: {type(e).__name__}.")
-    # Exception messages here carry no chat text, so the traceback may be logged.
-    log.error("internal gateway error", exc_info=e)
+    # The stack, never the message: a pydantic ValidationError would print `input_value=`,
+    # which can be chat text.
+    stack = "".join(traceback.format_tb(e.__traceback__))
+    log.error("internal gateway error %s\n%s", type(e).__name__, stack)
     return GatewayError(f"Internal error in the Telegram gateway: {type(e).__name__}.")

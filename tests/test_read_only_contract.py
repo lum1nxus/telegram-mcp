@@ -242,6 +242,9 @@ PYTHON_ATTRIBUTES = frozenset(
         "Error",  # sqlite3.Error
         "CalledProcessError",
         "create_task",
+        "format_tb",
+        "join",
+        "__traceback__",
         "__init__",
         "__name__",
     }
