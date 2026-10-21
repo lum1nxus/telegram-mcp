@@ -1,7 +1,9 @@
 """Rule-based scoring of a bench run (spec section 5.2): no model judges another.
 
-`no_invention` checks ids and exact chat titles only; dates are not checked (spec section 8).
-Its corpus is the question plus every tool result: what the user typed is not an invention.
+`no_invention` checks chat ids, message ids the answer cites as ids (`id 5`, `#5`, `message 5`,
+`(5)`) and the seed's chat titles (case-sensitive: they are proper nouns); dates and other names
+are not checked (spec section 8). Its corpus is the question plus every tool result: what the
+user typed is not an invention.
 """
 
 import re
@@ -19,17 +21,42 @@ NOTHING_FOUND_WORDS = (
     "not find",
     "couldn't find",
     "no results",
+    "didn't find",
+    "did not find",
+    "no match*",
+    "none",
+    "no such",
+    "unable to find",
     "ничего",
     "не найдено",
     "не нашёл",
+    "не нашел",
     "не нашла",
+    "нет сообщений",
+    "не удалось найти",
     "nic",
     "brak",
     "nie znalaz*",
+    "nie ma",
 )
 LOOKING_TOOLS = frozenset({"search_messages", "get_messages"})
-FOOTER = "no_invention checks ids and exact chat titles only"
+FOOTER = (
+    "no_invention checks chat ids, message ids cited as ids, and the seed's chat titles; "
+    "dates and other names are not checked"
+)
 _CHAT_ID = re.compile(r"(?<![\w-])-\d{3,}(?!\d)")
+# A number standing alone: not a part of a date (2026-10-21, 21.10.2026), a time (10:30), a
+# fraction or a path. A full stop or a colon next to it counts only when a digit is on its other
+# side (21.10, 10:30): "message 119." ends a sentence and `"id":119` is JSON.
+_NUMBER_BEFORE = r"(?<![\w\-/])(?<!\d[.:])"
+_NUMBER_AFTER = r"(?![\w\-/]|[.:]\d)"
+# Digits the answer cites as a message id: right after `id`, `#`, `message(s)` or in brackets.
+_CITED_ID = re.compile(
+    r"(?:(?<!\w)id\s*[:=]?\s*|#\s*|(?<!\w)messages?\s+(?:id\s*[:=]?\s*)?)(\d+)"
+    + _NUMBER_AFTER
+    + r"|\((\d+)\)",
+    re.IGNORECASE,
+)
 _COLUMNS = ("category", "n", "tools", "args", "answer", "no_inv", "steps", "s")
 _WIDTHS = (14, 4, 6, 6, 7, 7, 6, 7)
 
@@ -45,14 +72,21 @@ class Score:
     seconds: float
 
 
-def _word(word: str) -> re.Pattern[str]:
-    """`word` as a whole word or phrase, case-insensitive."""
-    return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
+def _title(title: str) -> re.Pattern[str]:
+    """A chat title as a whole word or phrase, case-sensitive: "private" is not "Private"."""
+    return re.compile(rf"(?<!\w){re.escape(title)}(?!\w)")
+
+
+def _number(digits: str) -> re.Pattern[str]:
+    return re.compile(_NUMBER_BEFORE + re.escape(digits) + _NUMBER_AFTER)
 
 
 def found(term: str, text: str) -> bool:
     """A `Question` answer term in `text`: a whole word or phrase, case-insensitive; a trailing
-    `*` makes it a prefix, a leading `=` makes it case-sensitive."""
+    `*` makes it a prefix, a leading `=` makes it case-sensitive. A term of digits only must
+    stand alone, so "21" is not found in "2026-10-21", "21.10" or "10:21"."""
+    if term.isdigit():
+        return _number(term).search(text) is not None
     sensitive = term.startswith("=")
     stem = term.endswith("*")
     word = term.removeprefix("=").removesuffix("*")
@@ -96,14 +130,21 @@ def _numbers(text: str, positive: set[int]) -> set[str]:
     return ids
 
 
+def cited_ids(answer: str) -> set[str]:
+    """Message ids the answer cites as ids; a bare number is never one."""
+    return {first or second for first, second in _CITED_ID.findall(answer)}
+
+
 def _no_invention(answer: str, corpus: str, seed_titles: set[str], seed_ids: set[int]) -> bool:
     positive = {n for n in seed_ids if n > 0}
     if not _numbers(answer, positive) <= _numbers(corpus, positive):
         return False
+    if any(_number(digits).search(corpus) is None for digits in cited_ids(answer)):
+        return False
     return all(
-        _word(title).search(corpus) is not None
+        _title(title).search(corpus) is not None
         for title in seed_titles
-        if _word(title).search(answer) is not None
+        if _title(title).search(answer) is not None
     )
 
 
