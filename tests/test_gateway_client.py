@@ -1,6 +1,7 @@
 """TelethonGateway against a stub client: no network."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -235,6 +236,10 @@ async def test_idle_during_request_keeps_connection(gw: TelethonGateway):
     await gw._on_idle()
     assert stub.disconnects == 1
     assert gw._ready is False
+    assert (gw._guard, gw._guard_task) == (None, None)
+    await asyncio.sleep(0)
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    assert pending == []
 
 
 async def test_reconnect_leaves_one_guard(gw: TelethonGateway):
@@ -273,3 +278,33 @@ async def test_close_never_raises(gw: TelethonGateway):
 
     stub.disconnect = broken  # type: ignore[method-assign]
     await gw.close()
+
+
+async def test_service_message_target_is_missing(gw: TelethonGateway):
+    _stub(gw).messages["ids"] = [_service(42)]
+    with pytest.raises(GatewayError, match="No message 42 in that chat"):
+        await gw.around(FORUM_ID, 42, before=1, after=1)
+
+
+async def test_unresolvable_username_is_unknown_sender(gw: TelethonGateway):
+    stub = _stub(gw)
+
+    async def unknown(value: str) -> Any:
+        raise ValueError(f"Cannot find any entity corresponding to {value}")
+
+    stub.get_input_entity = unknown  # type: ignore[method-assign]
+    with pytest.raises(GatewayError, match="Unknown sender: pass a user id or @username"):
+        await gw._input_user(stub, "@ghost")
+
+
+async def test_mapping_bug_is_internal_error_with_traceback(
+    gw: TelethonGateway, caplog: pytest.LogCaptureFixture
+):
+    broken = types.Message(id=9, peer_id=types.PeerChannel(1005), date=None, message="x")
+    _stub(gw).messages["plain"] = [broken]
+    caplog.set_level(logging.ERROR, logger="tgmcp.gateway")
+    with pytest.raises(GatewayError) as caught:
+        await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=5)
+    assert str(caught.value) == "Internal error in the Telegram gateway: ValidationError."
+    record = next(r for r in caplog.records if r.message == "internal gateway error")
+    assert record.exc_info is not None
