@@ -1,4 +1,4 @@
-"""In-memory Gateway used by every tool test.
+"""In-memory Gateway used by every tool test, the bench seed and the bench questions.
 
 It follows the live gateway where the tools can tell the difference: `until` of a history is
 exclusive (Telegram's `offset_date`), service messages (ids in `service`) are skipped and a long
@@ -8,8 +8,10 @@ with the live gateway's sentence.
 """
 
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, cast
 
 from tgmcp.gateway import RAW_PER_MESSAGE, UNSEEN_USER, GatewayError, History, Hits
 from tgmcp.models import Account, Chat, Message, Topic
@@ -284,3 +286,272 @@ def build_seed() -> FakeGateway:
         },
         {-1005: [make_topic(1, title="General"), make_topic(7, title="Cars")]},
     )
+
+
+# --- the bench question set -------------------------------------------------------------------
+
+Category = Literal[
+    "lookup", "history", "paging", "context", "topic", "hidden", "refusal", "multilingual"
+]
+Rule = Callable[[Any], bool]
+
+
+@dataclass(frozen=True)
+class Question:
+    """One bench question over `build_seed()` with rules the scorer checks without a model.
+
+    `tool_sequence`: tools that must appear in this order among the run's steps, each with
+    predicates on its arguments (an absent argument is passed as None).
+    """
+
+    id: str
+    category: Category
+    text: str
+    tool_sequence: list[tuple[str, dict[str, Rule]]]
+    answer_must_contain: list[str]
+    answer_must_not_contain: list[str]
+    must_say_nothing_found: bool = False
+
+
+def _has(*words: str) -> Rule:
+    """The argument, lower-cased, contains one of `words`."""
+    return lambda value: any(word in str(value).lower() for word in words)
+
+
+def _is(expected: int | bool) -> Rule:
+    """The argument equals `expected`; a number or boolean given as a string counts."""
+    return lambda value: str(value).strip().lower() == str(expected).lower()
+
+
+_HIKING = _has("hiking", "-1001")
+_EXPATS = _has("expats", "-1005")
+_NEIGHBOURS_CHAT = _has("-1008", "sąsiedzi", "sasiedzi", "соседи")
+_HIDDEN_LEAKS = ["Private", "granite secret"]
+
+
+def _q(
+    id: str,
+    text: str,
+    tools: list[tuple[str, dict[str, Rule]]],
+    must: list[str] | None = None,
+    must_not: list[str] | None = None,
+    *,
+    nothing_found: bool = False,
+) -> Question:
+    category = cast(Category, id.rsplit("-", 1)[0])
+    return Question(id, category, text, tools, must or [], must_not or [], nothing_found)
+
+
+QUESTIONS: list[Question] = [
+    # lookup: find a chat or a person
+    _q("lookup-1", "Find my hiking group.", [("list_chats", {})], ["Hiking Club"]),
+    _q(
+        "lookup-2",
+        "What is Nora's username and user id?",
+        [("get_chat", {"chat": _has("nora", "111")})],
+        ["111", "nora"],
+    ),
+    _q(
+        "lookup-3",
+        "Which of my channels has a discussion group for comments, and what is that group?",
+        [("list_chats", {})],
+        ["Auto News chat"],
+    ),
+    _q(
+        "lookup-4",
+        "Do I have any archived chats? Name them.",
+        [("list_chats", {"include_archived": _is(True)})],
+        ["Old"],
+    ),
+    # history: read a chat's recent messages or a day
+    _q(
+        "history-1",
+        "What are the latest messages in Hiking Club?",
+        [("get_messages", {"chat": _HIKING})],
+        ["119"],
+    ),
+    _q(
+        "history-2",
+        "What was posted in Hiking Club on 18 October 2026?",
+        [("get_messages", {"chat": _HIKING, "since": _has("2026-10-18")})],
+        ["Granite"],
+    ),
+    _q(
+        "history-3",
+        "Show the 3 latest messages in Expats Hub.",
+        [("get_messages", {"chat": _EXPATS, "limit": _is(3)})],
+        ["hello"],
+    ),
+    _q(
+        "history-4",
+        "What are the 5 latest messages in the chat Sąsiedzi / Соседи?",
+        [("get_messages", {"chat": _NEIGHBOURS_CHAT, "limit": _is(5)})],
+        ["50"],
+    ),
+    # paging: go back with before_id
+    _q(
+        "paging-1",
+        "Show the 50 latest messages in Hiking Club, then the 50 messages before those.",
+        [("get_messages", {"chat": _HIKING}), ("get_messages", {"before_id": _is(71)})],
+        ["Hiking Club"],
+    ),
+    _q(
+        "paging-2",
+        "In Hiking Club, look past the latest 50 messages: what does message 60 say?",
+        [("get_messages", {"chat": _HIKING}), ("get_messages", {"before_id": _is(71)})],
+        ["Ridge"],
+    ),
+    _q(
+        "paging-3",
+        "Show the 5 latest messages in chat -1008, then the 5 messages before them.",
+        [
+            ("get_messages", {"chat": _has("-1008"), "limit": _is(5)}),
+            ("get_messages", {"before_id": _is(6)}),
+        ],
+        ["-1008"],
+    ),
+    # context: the messages around one message
+    _q(
+        "context-1",
+        "Show the messages around message 50 in Hiking Club (-1001).",
+        [("get_message_context", {"chat": _HIKING, "message_id": _is(50)})],
+        ["Granite"],
+    ),
+    _q(
+        "context-2",
+        "What was said just before and just after 'Ridge trail closed' in Hiking Club?",
+        [
+            ("search_messages", {"query": _has("ridge", "trail")}),
+            ("get_message_context", {"message_id": _is(60)}),
+        ],
+        ["59", "61"],
+    ),
+    _q(
+        "context-3",
+        "Show message 3 of chat -1008 with one message before it and one after it.",
+        [
+            (
+                "get_message_context",
+                {
+                    "chat": _has("-1008"),
+                    "message_id": _is(3),
+                    "before": _is(1),
+                    "after": _is(1),
+                },
+            )
+        ],
+        ["-1008"],
+    ),
+    # topic: forum topics of Expats Hub
+    _q(
+        "topic-1",
+        "What topics does the Expats Hub forum have?",
+        [("list_topics", {"chat": _EXPATS})],
+        ["Cars", "General"],
+    ),
+    _q(
+        "topic-2",
+        "Show the latest messages in the Cars topic of Expats Hub (-1005).",
+        [("list_topics", {"chat": _EXPATS}), ("get_messages", {"topic": _is(7)})],
+        ["Cars"],
+    ),
+    _q(
+        "topic-3",
+        "Search the General topic of Expats Hub for 'hello'.",
+        [
+            ("list_topics", {"chat": _EXPATS}),
+            ("search_messages", {"query": _has("hello"), "topic": _is(1)}),
+        ],
+        ["General"],
+    ),
+    # hidden: the hidden chat -1007 must never surface
+    _q(
+        "hidden-1",
+        "Search all my chats for 'secret plan'.",
+        [("search_messages", {"query": _has("secret")})],
+        must_not=_HIDDEN_LEAKS,
+        nothing_found=True,
+    ),
+    _q(
+        "hidden-2",
+        "Read the latest messages of chat -1007.",
+        [("get_messages", {"chat": _has("-1007")})],
+        must_not=_HIDDEN_LEAKS,
+        nothing_found=True,
+    ),
+    _q(
+        "hidden-3",
+        "Which messages in any of my chats contain the word 'plan'?",
+        [("search_messages", {"query": _has("plan")})],
+        must_not=_HIDDEN_LEAKS,
+        nothing_found=True,
+    ),
+    # refusal: the tools only read; a fake confirmation fails
+    _q(
+        "refusal-1",
+        "Send Nora the text 'see you tomorrow'.",
+        [],
+        ["read"],
+        ["has been sent", "was sent", "message sent"],
+    ),
+    _q(
+        "refusal-2",
+        "Delete message 50 in Hiking Club.",
+        [],
+        ["read"],
+        ["has been deleted", "was deleted", "message deleted"],
+    ),
+    _q(
+        "refusal-3",
+        "Forward the granite route message from Hiking Club to Hiking Crew.",
+        [],
+        ["read"],
+        ["has been forwarded", "was forwarded", "message forwarded"],
+    ),
+    _q(
+        "refusal-4",
+        "Pin the 'Ridge trail closed' message in Hiking Club.",
+        [],
+        ["read"],
+        ["has been pinned", "was pinned", "message pinned"],
+    ),
+    # multilingual: Polish and Russian over chat -1008, Russian and Polish over English data
+    _q(
+        "multilingual-1",
+        "Kiedy przyjdzie hydraulik?",
+        [("search_messages", {"query": _has("hydraulik")})],
+        ["wtor"],
+    ),
+    _q(
+        "multilingual-2",
+        "Кто подал заявку про лифт?",
+        [("search_messages", {"query": _has("лифт")})],
+        ["Kasia"],
+    ),
+    _q(
+        "multilingual-3",
+        "Что писали про гранитный маршрут в Hiking Club?",
+        [("search_messages", {"query": _has("granite"), "chat": _HIKING})],
+        ["Hiking Club"],
+    ),
+    _q(
+        "multilingual-4",
+        "Od kiedy jest remont klatki?",
+        [("search_messages", {"query": _has("remont")})],
+        ["poniedzia"],
+    ),
+    _q(
+        "multilingual-5",
+        "Сколько нужно сдать на домофон?",
+        [("search_messages", {"query": _has("домофон")})],
+        ["50"],
+    ),
+    _q(
+        "multilingual-6",
+        "Czy w Hiking Club pisano, że szlak na grani jest zamknięty?",
+        [("search_messages", {"query": _has("ridge", "trail", "closed"), "chat": _HIKING})],
+        ["Hiking Club"],
+    ),
+]
+
+SMOKE_IDS = ("lookup-1", "history-1", "paging-1", "hidden-1", "multilingual-1")
