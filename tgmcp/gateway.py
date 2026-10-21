@@ -36,6 +36,10 @@ class NotLoggedIn(GatewayError):  # noqa: N818 - name fixed by the interface
         super().__init__(message)
 
 
+class ApiKeyError(GatewayError):
+    """Telegram rejected the API id or hash, so the saved ones are not worth keeping."""
+
+
 class Busy(GatewayError):  # noqa: N818 - name fixed by the interface
     """Flood wait; `.seconds` says how long Telegram asks to wait."""
 
@@ -196,7 +200,7 @@ _FIXED_ERRORS: tuple[tuple[tuple[type[Exception], ...], type[GatewayError], str]
     (
         _DEAD_SESSION,
         NotLoggedIn,
-        "Telegram no longer accepts this session: run `tgmcp login` again.",
+        "Telegram no longer accepts this session: run `tgmcp logout`, then `tgmcp login`.",
     ),
     (
         (errors.ChannelPrivateError,),
@@ -304,9 +308,39 @@ def _day_end(day: date | None) -> datetime | None:
     return datetime.combine(_utc_day(day) + timedelta(days=1), dtime.min, tzinfo=UTC)
 
 
+def _is_plain(m: Any) -> bool:
+    """False for service messages (topic created, member joined): they carry no text."""
+    return m is not None and not isinstance(m, types.MessageService)
+
+
 def _plain(messages: list[Any]) -> list[Any]:
-    """Drop service messages (topic created, member joined): they carry no text."""
-    return [m for m in messages if m is not None and not isinstance(m, types.MessageService)]
+    return [m for m in messages if _is_plain(m)]
+
+
+# A page skips service messages; it gives up after this many raw messages per wanted one.
+RAW_PER_MESSAGE = 4
+
+
+async def _collect(
+    stream: AsyncIterator[Any], limit: int, too_old: Callable[[Any], bool]
+) -> list[Any]:
+    """Up to `limit` plain messages from a newest-first stream. Stops at the first raw message
+    for which `too_old` is true, or after `limit * RAW_PER_MESSAGE` raw messages so a long run
+    of service messages cannot keep it fetching."""
+    out: list[Any] = []
+    seen = 0
+    async for m in stream:
+        seen += 1
+        if m is not None and too_old(m):
+            break
+        if _is_plain(m):
+            out.append(m)
+            if len(out) >= limit:
+                break
+        if seen >= limit * RAW_PER_MESSAGE:
+            log.info("page stopped after %d raw messages", seen)
+            break
+    return out
 
 
 def _guard_done(task: asyncio.Task[None]) -> None:
@@ -324,6 +358,7 @@ class TelethonGateway(Gateway):
             settings.api_id,
             settings.api_hash,
             flood_sleep_threshold=10,
+            receive_updates=False,  # the server only asks; it never listens for updates
         )
         self._lock = asyncio.Lock()
         self._ready = False
@@ -481,12 +516,12 @@ class TelethonGateway(Gateway):
                     peer=peer, offset_date=None, offset_id=0, offset_topic=0, limit=limit
                 )
             )
-        dates = {m.id: m.date for m in result.messages}
-        return [
-            topic_from_forum_topic(t, last_message_at=dates.get(t.top_message))
-            for t in result.topics
-            if isinstance(t, types.ForumTopic)
-        ]
+            dates = {m.id: m.date for m in result.messages}
+            return [
+                topic_from_forum_topic(t, last_message_at=dates.get(t.top_message))
+                for t in result.topics
+                if isinstance(t, types.ForumTopic)
+            ]
 
     # Messages ------------------------------------------------------------------------------
 
@@ -501,31 +536,29 @@ class TelethonGateway(Gateway):
         limit: int,
     ) -> list[Message]:
         since, until = _aware(since), _aware(until)
-        out: list[Message] = []
         async with self._session() as client:
             peer = await self._peer(client, chat_id)
-            async for m in client.iter_messages(
-                peer, limit=limit, offset_id=before_id or 0, offset_date=until, reply_to=topic
-            ):
-                if since is not None and m.date < since:
-                    break
-                out.extend(self._map(x, chat_id) for x in _plain([m]))
+            stream = client.iter_messages(
+                peer, limit=None, offset_id=before_id or 0, offset_date=until, reply_to=topic
+            )
+            found = await _collect(stream, limit, lambda m: since is not None and m.date < since)
+            out = [self._map(m, chat_id) for m in found]
         log.info("history chat=%s n=%d", chat_id, len(out))
         return out
 
     async def _input_user(self, client: Any, value: str | None) -> Any:
         if value is None:
             return None
-        if re.fullmatch(r"\d+", value):
-            return int(value)
-        if re.fullmatch(r"@\w+", value):
-            try:
-                return await client.get_input_entity(value)
-            except ValueError as exc:  # Telethon could not resolve the username
-                raise GatewayError(
-                    "Unknown sender: pass a user id or @username from this chat."
-                ) from exc
-        raise GatewayError("sender must be a user id or @username")
+        numeric = re.fullmatch(r"\d+", value) is not None
+        if not numeric and re.fullmatch(r"@\w+", value) is None:
+            raise GatewayError("sender must be a user id or @username")
+        try:
+            # Resolved now: an id this process has not seen would fail later, inside Telethon.
+            return await client.get_input_entity(int(value) if numeric else value)
+        except ValueError as exc:  # Telethon could not resolve the id or username
+            raise GatewayError(
+                "Unknown sender: pass a user id or @username from this chat."
+            ) from exc
 
     async def search_in_chat(  # noqa: PLR0913 - signature fixed by the interface
         self,
@@ -562,7 +595,7 @@ class TelethonGateway(Gateway):
             found = [m for m in _plain(result.messages) if isinstance(m, types.Message)]
             for m in found:
                 m._finish_init(client, entities, peer)
-        out = [self._map(m, chat_id) for m in found]
+            out = [self._map(m, chat_id) for m in found]
         log.info("search_in_chat chat=%s n=%d", chat_id, len(out))
         return out
 
@@ -570,15 +603,17 @@ class TelethonGateway(Gateway):
         self, query: str, *, since: date | None, until: date | None, limit: int
     ) -> list[Message]:
         first_day = _utc_day(since) if since else None
-        out: list[Message] = []
         async with self._session() as client:
             # Newest first, starting at the end of `until`; stop at the first hit before `since`.
-            async for m in client.iter_messages(
-                None, search=query, limit=limit, offset_date=_day_end(until)
-            ):
-                if first_day is not None and m.date.astimezone(UTC).date() < first_day:
-                    break
-                out.extend(self._map(x, x.chat_id) for x in _plain([m]))
+            stream = client.iter_messages(
+                None, search=query, limit=None, offset_date=_day_end(until)
+            )
+            found = await _collect(
+                stream,
+                limit,
+                lambda m: first_day is not None and m.date.astimezone(UTC).date() < first_day,
+            )
+            out = [self._map(m, m.chat_id) for m in found]
         log.info("search_global n=%d", len(out))
         return out
 
@@ -609,12 +644,10 @@ class TelethonGateway(Gateway):
                     )
                 ]
             )
-        log.info("around chat=%s before=%d after=%d", chat_id, len(older), len(newer))
-        return (
-            [self._map(m, chat_id) for m in reversed(older)],
-            target,
-            [self._map(m, chat_id) for m in newer],
-        )
+            earlier = [self._map(m, chat_id) for m in reversed(older)]
+            later = [self._map(m, chat_id) for m in newer]
+        log.info("around chat=%s before=%d after=%d", chat_id, len(earlier), len(later))
+        return earlier, target, later
 
 
 def factory(settings: Settings) -> Gateway:
@@ -622,12 +655,28 @@ def factory(settings: Settings) -> Gateway:
     return TelethonGateway(settings, load_session_string(settings.session_path))
 
 
-async def interactive_login(settings: Settings) -> Account:
+_DEAD_KEY = (errors.AuthKeyDuplicatedError, errors.AuthKeyUnregisteredError)
+
+
+async def interactive_login(settings: Settings) -> Account:  # noqa: C901 - one except per case
     """The only place the file session is opened for writing: Telethon asks on the console."""
-    client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
+    client: Any = None
+    dead = False
     try:
+        client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
         await client.start()
         me = await client.get_me()
+    except errors.ApiIdInvalidError as e:
+        raise ApiKeyError(
+            "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
+        ) from e
+    except _DEAD_KEY as e:  # an existing session file that Telegram no longer accepts
+        dead = True
+        raise GatewayError(
+            "Telegram no longer accepts the old session; it was removed. Run `tgmcp login` again."
+        ) from e
+    except RuntimeError as e:  # Telethon gives up after three wrong codes
+        raise GatewayError("The code was wrong three times: run `tgmcp login` again.") from e
     except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError) as e:
         raise GatewayError("The code was wrong or expired: run `tgmcp login` again.") from e
     except (errors.SessionPasswordNeededError, errors.PasswordHashInvalidError) as e:
@@ -639,7 +688,10 @@ async def interactive_login(settings: Settings) -> Account:
     except OSError as e:
         raise GatewayError("Could not reach Telegram: check the network and try again.") from e
     finally:
-        await client.disconnect()
+        if client is not None:
+            await client.disconnect()  # also closes the session file
+        if dead:
+            settings.session_path.unlink(missing_ok=True)
     return Account(id=me.id, name=utils.get_display_name(me), username=me.username)
 
 

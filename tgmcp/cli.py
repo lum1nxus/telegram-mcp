@@ -11,12 +11,15 @@ from tgmcp import logging_setup
 from tgmcp.config import (
     ConfigError,
     Settings,
+    ensure_home,
+    forget_credentials,
     home,
     load_settings,
     restrict_to_owner,
     save_credentials,
 )
 from tgmcp.gateway import (
+    ApiKeyError,
     GatewayError,
     NotLoggedIn,
     end_session,
@@ -24,7 +27,6 @@ from tgmcp.gateway import (
     interactive_login,
     load_session_string,
 )
-from tgmcp.models import Chat
 from tgmcp.resolve import Directory
 from tgmcp.server import build_server
 
@@ -68,7 +70,9 @@ def _discard_unfinished(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _login() -> int:
+def _login(reset: bool = False) -> int:
+    if reset:  # forget the saved API id and hash and ask for them again
+        forget_credentials(home())
     try:
         settings = load_settings()
     except ConfigError:
@@ -76,11 +80,13 @@ def _login() -> int:
         if asked is None:
             return 1
         settings = asked
-    settings.home.mkdir(parents=True, exist_ok=True)
+    ensure_home(settings.home)
     try:
         account = asyncio.run(interactive_login(settings))
     except BaseException as exc:
         _discard_unfinished(settings.session_path)
+        if isinstance(exc, ApiKeyError):  # wrong id or hash: keeping them would fail again
+            forget_credentials(settings.home)
         if isinstance(exc, GatewayError):
             _complain(str(exc))
             return 1
@@ -89,14 +95,6 @@ def _login() -> int:
         restrict_to_owner(settings.session_path)
     _say(f"logged in as {account.name}")
     return 0
-
-
-def _keys(chat: Chat) -> set[str]:
-    """The spellings a hidden-chat entry may use for this chat (as Directory matches them)."""
-    keys = {str(chat.id), chat.title.lower()}
-    if chat.username:
-        keys |= {chat.username.lower(), f"@{chat.username.lower()}"}
-    return keys
 
 
 async def _whoami(settings: Settings) -> int:
@@ -113,7 +111,7 @@ async def _whoami(settings: Settings) -> int:
     _say(f"account: {me.name}{handle}")
     _say(f"chats: {len(visible)} (archived {archived}, hidden {hidden})")
     for entry in settings.hidden_chats:
-        found = [c for c in dialogs if entry.strip().lower() in _keys(c)]
+        found = [c for c in dialogs if entry.strip().lower() in Directory.hidden_keys(c)]
         if found:
             for chat in found:
                 _say(f"  hidden: {chat.title} ({chat.id})")
@@ -137,6 +135,7 @@ def _whoami_command() -> int:
 def _serve() -> int:
     try:
         settings = load_settings()
+        ensure_home(settings.home)
         logging_setup.configure(settings.log_path)
         gateway = factory(settings)
     except (NotLoggedIn, ConfigError) as exc:
@@ -176,7 +175,10 @@ def _parser() -> argparse.ArgumentParser:
         prog="tgmcp", description="Read-only Telegram MCP server for Claude Code."
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("login", help="log in to Telegram and save the session")
+    login = commands.add_parser("login", help="log in to Telegram and save the session")
+    login.add_argument(
+        "--reset", action="store_true", help="forget the saved API id and hash and ask again"
+    )
     commands.add_parser("whoami", help="show the account, chat counts and hidden chats")
     commands.add_parser("serve", help="run the MCP server on stdio (started by Claude Code)")
     commands.add_parser("logout", help="end the login on Telegram and delete the session file")
@@ -186,7 +188,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     commands = {
-        "login": _login,
+        "login": lambda: _login(reset=args.reset),
         "whoami": _whoami_command,
         "serve": _serve,
         "logout": _logout,

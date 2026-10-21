@@ -49,6 +49,8 @@ async def test_hidden_by_username_is_case_insensitive(seed):
         await d.resolve("@autonews")
     assert d.is_hidden(make_chat(5, username="AUTONEWS"))
     assert not d.is_hidden(make_chat(5))
+    keys = resolve.Directory.hidden_keys(make_chat(5, title="Auto News", username="AutoNews"))
+    assert keys == {"5", "auto news", "autonews", "@autonews"}
 
 
 async def test_archived_chat_resolves(seed):
