@@ -24,8 +24,11 @@ include = ["tgmcp*"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = ["live: talks to the real Telegram account, skipped without a session"]
-addopts = "-m 'not live'"
+markers = [
+    "live: talks to the real Telegram account, skipped without a session",
+    "local: runs a local model through Ollama, skipped unless it answers on 127.0.0.1:11434",
+]
+addopts = "-m 'not live and not local'"
 
 [tool.ruff]
 line-length = 100
@@ -44,6 +47,7 @@ max-args = 6
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["PLR2004"]
+"tgmcp/host/benchdata.py" = ["PLR2004", "RUF001"]  # fixture data: Cyrillic text, seed ids
 "check.py" = ["T20"]
 "tgmcp/cli.py" = ["T20"]
 

@@ -58,7 +58,7 @@ async def test_hidden_chat_is_invisible(seed):
     d = resolve.Directory(seed, hidden=["-1007"])
     with pytest.raises(resolve.NotFound) as e:
         await d.resolve("Private")
-    assert "among your 7 chats" in str(e.value)
+    assert "among your 8 chats" in str(e.value)
     with pytest.raises(resolve.NotFound):
         await d.resolve("-1007")
     assert -1007 not in [c.id for c in await d.chats()]
@@ -88,7 +88,7 @@ async def test_miss_refreshes_once(seed):
     assert seed.calls.count("dialogs") == 1
     seed.chats.append(make_chat(-2000, title="Fresh Arrival"))
     clock.now = 30.0  # younger than the age refresh, older than the miss refresh
-    assert len(await d.chats()) == 8  # no reload by age yet
+    assert len(await d.chats()) == 9  # no reload by age yet
     assert seed.calls.count("dialogs") == 1
     assert (await d.resolve("fresh arrival")).id == -2000  # the miss reloads
     assert seed.calls.count("dialogs") == 2
@@ -118,7 +118,7 @@ async def test_chats_refreshes_by_age_and_returns_a_copy(seed):
     d = resolve.Directory(seed, hidden=[], refresh_after_s=60.0, clock=clock)
     first = await d.chats()
     first.clear()
-    assert len(await d.chats()) == 8
+    assert len(await d.chats()) == 9
     assert seed.calls.count("dialogs") == 1
     seed.chats.append(make_chat(-2000, title="Fresh Arrival"))
     clock.now = 100.0
