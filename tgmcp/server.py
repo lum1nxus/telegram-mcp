@@ -5,7 +5,7 @@ import functools
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -15,7 +15,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from tgmcp.config import Settings
-from tgmcp.gateway import Busy, Gateway, GatewayError, NotLoggedIn
+from tgmcp.gateway import Gateway, GatewayError, as_utc
 from tgmcp.models import (
     RESULT_BUDGET,
     SEARCH_NOTE,
@@ -28,6 +28,8 @@ from tgmcp.models import (
     Topic,
     cap_text,
     fit_budget,
+    json_size,
+    quoted,
 )
 from tgmcp.resolve import Ambiguous, Directory, NotFound
 
@@ -51,7 +53,6 @@ ANNOTATIONS = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 class AppContext:
     gateway: Gateway
     directory: Directory
-    settings: Settings
 
 
 def guarded[**P, R](
@@ -65,13 +66,7 @@ def guarded[**P, R](
             try:
                 async with asyncio.timeout(TOOL_TIMEOUT_S):
                     return await func(*args, **kwargs)
-            except NotLoggedIn as e:  # the sentence says why: no session, revoked, wrong account
-                raise ToolError(str(e)) from e
-            except Busy as e:
-                raise ToolError(
-                    f"Telegram asks to wait {e.seconds} seconds before the next request; "
-                    "do not retry sooner."
-                ) from e
+            # Each error is already one sentence: not logged in (and why), flood wait, no match.
             except (Ambiguous, NotFound, GatewayError) as e:
                 raise ToolError(str(e)) from e
             except TimeoutError as e:
@@ -108,21 +103,25 @@ def _filter_chats(
     ]
 
 
-def _as_utc(value: date) -> date:
-    """A naive datetime is taken as UTC, as the gateway does; a plain date is left alone."""
-    if isinstance(value, datetime) and value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value
-
-
 def _check_range(since: date | datetime | None, until: date | datetime | None) -> None:
-    if since is not None and until is not None and _as_utc(since) > _as_utc(until):
+    if since is not None and until is not None and as_utc(since) > as_utc(until):
         raise ToolError("since must not be after until.")
+
+
+def _not_a_forum(chat: Chat) -> ToolError:
+    # A title is chat content (anyone who can rename a group controls it): quoted, cut, by id.
+    return ToolError(f"Chat {chat.id} ({quoted(chat.title)}) is not a forum group.")
 
 
 def _check_topic(chat: Chat, topic: int | None) -> None:
     if topic is not None and not chat.is_forum:
-        raise ToolError(f"{chat.title} is not a forum group.")
+        raise _not_a_forum(chat)
+
+
+async def _resolve(app: AppContext, chat: str) -> Chat:
+    if not chat.strip():
+        raise ToolError("chat must name a chat (id, @username or title).")
+    return await app.directory.resolve(chat)
 
 
 async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
@@ -147,9 +146,9 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
         hits = [m for m in found if m.chat_id in visible]
         full = len(found) == limit
     else:
-        target = await app.directory.resolve(chat)
+        target = await _resolve(app, chat)
         _check_topic(target, topic)
-        scope = target.title
+        scope = target.title  # a data field, like the hits
         hits = await app.gateway.search_in_chat(
             target.id, query, topic=topic, sender=sender, since=since, until=until, limit=limit
         )
@@ -176,18 +175,20 @@ async def _history(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
     limit: int,
 ) -> Page:
     _check_range(since, until)
-    target = await app.directory.resolve(chat)
+    target = await _resolve(app, chat)
     _check_topic(target, topic)
-    found = await app.gateway.history(
+    page = await app.gateway.history(
         target.id, topic=topic, before_id=before_id, since=since, until=until, limit=limit
     )
-    kept, cut = fit_budget([_capped(m) for m in found])
-    more = len(found) == limit
+    kept, cut = fit_budget([_capped(m) for m in page.messages])
+    # Cut by the budget: continue after the last message kept. Otherwise the gateway knows
+    # where the next page starts, also after a page that a run of service messages cut short.
+    cursor = kept[-1].id if cut and kept else page.next_before_id
     return Page(
         chat=target,
         messages=kept,
-        truncated=cut,
-        next_before_id=kept[-1].id if (more or cut) and kept else None,
+        truncated=cut or page.stopped_early,
+        next_before_id=cursor,
     )
 
 
@@ -197,24 +198,16 @@ def _fit_context(
     """Drop the messages farthest from the target until the result fits the budget."""
     before = [_capped(m) for m in earlier]
     after = [_capped(m) for m in later]
-    size = len(target.model_dump_json()) + sum(len(m.model_dump_json()) for m in before + after)
+    size = json_size(target) + sum(json_size(m) for m in before + after)
     dropped = False
     take_before = True
     while size > RESULT_BUDGET and (before or after):
         from_before = (take_before and bool(before)) or not after
         gone = before.pop(0) if from_before else after.pop()
         take_before = not take_before
-        size -= len(gone.model_dump_json())
+        size -= json_size(gone)
         dropped = True
     return Context(chat=chat, target=target, before=before, after=after, truncated=dropped)
-
-
-async def _chat_details(app: AppContext, chat: str) -> Chat:
-    found = await app.directory.resolve(chat)
-    details = await app.gateway.chat_details(found.id)
-    if app.directory.is_hidden(details):
-        raise NotFound(chat, len(await app.directory.chats()))
-    return details
 
 
 def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Settings) -> MCPServer:
@@ -222,7 +215,7 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
     async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
         gateway = gateway_factory(settings)
         try:
-            yield AppContext(gateway, Directory(gateway, settings.hidden_chats), settings)
+            yield AppContext(gateway, Directory(gateway, settings.hidden_chats))
         finally:
             await gateway.close()
 
@@ -262,7 +255,8 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
     )
     @guarded("get_chat")
     async def get_chat(ctx: ToolContext[AppContext], chat: str) -> Chat:
-        return await _chat_details(_app(ctx), chat)
+        app = _app(ctx)
+        return await app.gateway.chat_details((await _resolve(app, chat)).id)
 
     @mcp.tool(
         name="list_topics",
@@ -277,9 +271,9 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
         limit: Annotated[int, Field(ge=1, le=200)] = 100,
     ) -> list[Topic]:
         app = _app(ctx)
-        found = await app.directory.resolve(chat)
+        found = await _resolve(app, chat)
         if not found.is_forum:
-            raise ToolError(f"{found.title} is not a forum group.")
+            raise _not_a_forum(found)
         return await app.gateway.topics(found.id, limit)
 
     @mcp.tool(
@@ -344,7 +338,7 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
         after: Annotated[int, Field(ge=0, le=30)] = 10,
     ) -> Context:
         app = _app(ctx)
-        found = await app.directory.resolve(chat)
+        found = await _resolve(app, chat)
         earlier, middle, later = await app.gateway.around(
             found.id, message_id, before=before, after=after
         )

@@ -16,8 +16,17 @@ def test_env_overrides_file(tmp_path):
     assert (s.api_id, s.api_hash, s.hidden_chats) == (2, None, ("@y", "-100123"))
     assert s.secrets_path == tmp_path / "secrets.bin"
     assert s.legacy_session_path == tmp_path / "telegram.session"
-    assert s.log_path == tmp_path / "tgmcp.log"
+    assert s.log_template == tmp_path / "tgmcp.log"
     assert config.load_settings({**env, "TGMCP_API_HASH": "dev"}).api_hash == "dev"
+
+
+@pytest.mark.parametrize("value", ['{"x": 1}', "5"])
+def test_hidden_chats_must_be_a_list(tmp_path, value):
+    (tmp_path / "config.json").write_text(
+        '{"api_id": 1, "hidden_chats": ' + value + "}", encoding="utf-8"
+    )
+    with pytest.raises(config.ConfigError, match="hidden_chats must be a list"):
+        config.load_settings({"TGMCP_HOME": str(tmp_path)})
 
 
 def test_missing_credentials_is_config_error(tmp_path):

@@ -65,7 +65,9 @@ class Settings:
         return self.home / LEGACY_SESSION_FILE
 
     @property
-    def log_path(self) -> Path:
+    def log_template(self) -> Path:
+        """The name pattern of the log files: each `serve` writes `tgmcp-<pid>.log` (see
+        `logging_setup.configure`); no file has this exact name."""
         return self.home / "tgmcp.log"
 
 
@@ -84,6 +86,8 @@ def _read_file(path: Path) -> dict[str, Any]:
 def _split_chats(items: Any) -> tuple[str, ...]:
     if isinstance(items, str):
         items = items.split(",")
+    if items is not None and not isinstance(items, list):
+        raise ConfigError("hidden_chats must be a list of ids, @usernames or titles.")
     return tuple(s for s in (str(i).strip() for i in items or []) if s)
 
 

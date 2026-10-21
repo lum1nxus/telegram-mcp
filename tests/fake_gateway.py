@@ -3,7 +3,7 @@
 import re
 from datetime import date, datetime
 
-from tgmcp.gateway import GatewayError
+from tgmcp.gateway import GatewayError, History
 from tgmcp.models import Account, Chat, Message, Topic
 
 
@@ -63,7 +63,7 @@ class FakeGateway:
         since: datetime | None,
         until: datetime | None,
         limit: int,
-    ) -> list[Message]:
+    ) -> History:
         self._enter("history")
         found = [
             m
@@ -74,7 +74,8 @@ class FakeGateway:
             and (until is None or m.date <= until)
         ]
         found.sort(key=lambda m: m.id, reverse=True)
-        return found[:limit]
+        page = found[:limit]
+        return History(page, page[-1].id if len(page) == limit else None)
 
     def _filter(
         self, chat_id: int, query: str, since: date | None, until: date | None

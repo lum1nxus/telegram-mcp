@@ -147,7 +147,7 @@ def _serve() -> int:
     try:
         settings = load_settings()
         ensure_home(settings.home)
-        logging_setup.configure(settings.log_path)
+        logging_setup.configure(settings.log_template)
         gateway = factory(settings)
     except (NotLoggedIn, ConfigError) as exc:
         _complain(str(exc))

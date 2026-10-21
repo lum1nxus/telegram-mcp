@@ -10,7 +10,10 @@ Kind = Literal["user", "group", "channel"]
 MediaKind = Literal["photo", "document", "voice", "video", "sticker", "other"]
 
 TEXT_CAP = 2000
-RESULT_BUDGET = 60_000
+# Bytes of compact UTF-8 JSON. mcp sends a result twice (structured content and a pretty-printed
+# text copy of it), so a result at the budget is about 62 KB on the wire.
+RESULT_BUDGET = 30_000
+QUOTE_CAP = 60
 SEARCH_NOTE = (
     "Telegram's search matches the beginnings of words, not fragments: "
     "'market' finds 'marketing' but not 'supermarket'. Rephrase before concluding there is nothing."
@@ -89,14 +92,26 @@ def cap_text(text: str, cap: int = TEXT_CAP) -> tuple[str, bool]:
     return text[:cap], True
 
 
+def json_size(item: BaseModel) -> int:
+    """Bytes of the item's compact JSON in UTF-8 (Cyrillic takes two bytes a letter)."""
+    return len(item.model_dump_json().encode("utf-8"))
+
+
+def quoted(text: str, cap: int = QUOTE_CAP) -> str:
+    """`repr(text)` cut to `cap` characters: how a chat title or a user's argument enters an
+    error sentence, so it reads as a quotation, never as part of the sentence."""
+    shown = repr(text)
+    return shown if len(shown) <= cap else shown[: cap - 1] + "\u2026"
+
+
 def fit_budget[M: BaseModel](
     items: Sequence[M], budget: int = RESULT_BUDGET
 ) -> tuple[list[M], bool]:
-    """Keep the longest prefix whose JSON size stays under `budget` (at least one item)."""
+    """Keep the longest prefix whose JSON size in bytes stays under `budget` (at least one)."""
     kept: list[M] = []
     total = 0
     for item in items:
-        total += len(item.model_dump_json())
+        total += json_size(item)
         if kept and total > budget:
             break
         kept.append(item)
