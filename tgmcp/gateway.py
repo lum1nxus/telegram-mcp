@@ -620,3 +620,24 @@ class TelethonGateway(Gateway):
 def factory(settings: Settings) -> Gateway:
     """The gateway `serve` hands to the server; a missing session fails before it starts."""
     return TelethonGateway(settings, load_session_string(settings.session_path))
+
+
+async def interactive_login(settings: Settings) -> Account:
+    """The only place the file session is opened for writing: Telethon asks on the console."""
+    client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
+    try:
+        await client.start()
+        me = await client.get_me()
+    finally:
+        await client.disconnect()
+    return Account(id=me.id, name=utils.get_display_name(me), username=me.username)
+
+
+async def end_session(settings: Settings) -> None:
+    """The only place the file session is opened for writing: ends the login on Telegram."""
+    client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
+    await client.connect()
+    try:
+        await client.log_out()
+    finally:
+        await client.disconnect()
