@@ -1,10 +1,40 @@
 # Roadmap
 
-For anyone curious what may come next: ideas worth doing, each with its trade-off, none of them promised; the read-only rule is not up for change (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+For anyone curious what may come next: ideas worth doing, each with its trade-off, none of them promised; the read-only rule is not up for change (see [CONTRIBUTING.md](../CONTRIBUTING.md)). The first two sections are the author's priorities; the rest is unordered.
+
+## 1. Smarter search
+
+Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Four steps are possible, cheapest first; the recommended order is 1 → 3 → 4, and step 2 is better skipped.
+
+### Step 1: query expansion, no index
+
+The server splits the question's words, cuts each to its stem ("marketing" → "market", "фруктовая" → "фрукт") with a small stemmer for English, Russian and Polish (Snowball), adds spelling variants (Latin/Cyrillic transliteration, ё/е, Polish diacritics with and without), runs the few resulting Telegram searches and merges the hits. One call from the model, several from the server. Nothing is stored. The price: 2–5 Telegram requests per search instead of one, and a stemmer dependency. Doable in a day; no privacy change.
+
+### Step 2: splitting compound words
+
+A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can split "минитрактор" into "мини" + "трактор" and recognise word forms a stemmer misses. On its own it buys little: Telegram still matches prefixes, so "фрукт" never finds "минитрактор" there; the split only helps once there is a local index (step 3). The dictionaries weigh tens of megabytes. Skip unless step 3 lands.
+
+### Step 3: a local full-text index (SQLite FTS5)
+
+Opt-in: download the text of chosen chats into an encrypted database on disk and search it with a trigram tokenizer (fragments: "kosiar" inside "mikrokosiarka"), stemming, phrase search and relevance ranking; instant and offline. The price is the main promise of today's design: a copy of chats on disk. If it comes, it must be opt-in per chat, encrypted with the same per-user protection as `secrets.bin`, easy to delete, respect hidden chats, and warn that the first load of a large chat takes minutes and counts against Telegram's limits.
+
+### Step 4: semantic search over the index
+
+On top of step 3: embeddings from a local model (through Ollama) so "what did people recommend for growing tomatoes" finds messages about greenhouses with no word in common, across the three languages at once. The price: step 3 plus an embedding model (about half a gigabyte) and hours of indexing on a large account.
+
+## 2. Final audit before calling it 1.0
+
+Three questions answered by one deep review (Fable, with the full white-box report in the repository):
+
+- **Security of the code as a whole**, again, after all the changes since the last review: the request allowlist, the contract test, secrets at rest, the local-only rule, prompt injection through chat content, what a malicious fork of this repository could do to a user who installs it.
+- **Python best practices**: dead code, duplication, typing, asyncio hygiene, module sizes, test brittleness, packaging.
+- **That it really is MCP**: conformance with the MCP specification as a server (initialize, tool listing, tool annotations, structured output, error results, cancellation, logging), checked with the MCP Inspector and the SDK's conformance tests, and interoperability with at least two clients besides Claude Code.
+
+Alongside it, the repository's own protection is kept at: actions pinned to commit SHAs and restricted to GitHub-owned and verified publishers, a code-scanning merge gate, tag protection, secret scanning with push protection, Dependabot, no deploy keys or secrets, and two-factor authentication on the owner's account.
 
 ## Local full-text index (SQLite FTS5)
 
-Telegram's own search matches word beginnings only, so "market" does not find "supermarket", and several words are matched as separate prefixes. A local index built with SQLite FTS5 could search fragments and phrases, rank results and work offline. The price is the main promise of today's design: a copy of your chats on disk. If it ever comes, it should be opt-in, encrypted with the same per-user protection as `secrets.bin`, restricted to chosen chats, easy to delete, and it must respect hidden chats.
+See step 3 above.
 
 ## A local broker process
 
@@ -13,6 +43,34 @@ Each client session starts its own `tgmcp serve` with its own connection on the 
 ## Keychain and Secret Service for secrets
 
 Today `secrets.bin` is encrypted with DPAPI on Windows and is a plain `0600` file elsewhere. macOS Keychain and the Linux Secret Service (libsecret) would give those systems real at-rest protection. The price is a new dependency (or a command-line bridge) per platform, a prompt on some setups, and headless Linux servers that have no keyring.
+
+## Re-restrict an existing data folder
+
+`ensure_home` restricts the data folder only when it creates it. A folder created by an older build (before the ACL fix) keeps its wider permissions until the user runs `tgmcp logout` and `login`. Restricting an existing folder once at every `login` would close that quietly. Small.
+
+## Who said what, and period digests
+
+Two question shapes small models handle badly today: "who said X" (they page through history and count by hand) and "what happened last week in group Y" (the full history blows the result budget). A `sender` summary on search results, and a `get_messages` mode that groups by day with counts and the first line of each message, would answer both within the budget. The price: two more result shapes to document and test.
+
+## Search in the chat's language
+
+A Russian question about a Polish chat fails because Telegram wants the word in the chat's language. The host could detect a chat's language from its last messages and translate the search term with the local model before calling the tool. Text stays on the PC. The price: one extra local model call per search and a wrong guess on mixed-language chats.
+
+## Compress long results with the local model
+
+The host cuts a tool result at 16 000 characters. Instead, a small local model could summarise the cut part so the main model loses less. Text stays on the PC. The price: a second model in memory, slower answers, and summaries that can drop the fact the user needed.
+
+## Saved questions as MCP prompts
+
+MCP lets a server offer ready-made prompts ("summarise last week in chat X"). A short list of them would turn a long question into one click in clients that show prompts. The price: strings to keep in sync with the tools, and clients differ in how they show prompts.
+
+## In-memory result cache per session
+
+Repeated calls for the same page (small models retry a lot) go to Telegram every time and count against flood limits. A cache in the server process, keyed by tool and arguments, for the life of the session, would cut that. Never on disk. The price: stale results within a session; a short time-to-live fixes it.
+
+## `tgmcp ask --budget`
+
+A wall-clock budget ("--budget 60s") so a slow model cannot hang a terminal for minutes; today only the 120 s per-request timeout and `--max-steps` bound a run.
 
 ## Media download behind an explicit flag
 
@@ -38,9 +96,9 @@ Three behaviours were reasoned from Telethon's code but not yet confirmed on a r
 
 `tgmcp ask` answers one question and forgets it. A `--follow-up` option could keep the last run's messages in a file and continue from them, so "and what did she say after that?" works. The price: a file that holds message text on disk (it would need the same protection as `secrets.bin` and a clear way to delete it), and a context that grows past what a small model can hold.
 
-## Local models: a model as the bench's judge
+## Local models: a model as the bench's judge, language and stability columns
 
-`tgmcp bench` scores with fixed rules: the right tools, expected words in the answer, no invented ids or titles. A second model judging each answer could also catch wrong retellings and wrong dates. The price: the judge makes its own mistakes, results stop being repeatable, and a run takes twice as long. Rules stay the reference; a judge would be an extra column.
+`tgmcp bench` scores with fixed rules: the right tools, expected words in the answer, no invented ids or titles. Two cheap columns first: the answer's language (today an answer in French to an English question scores 100 %) and the spread between `--repeat` runs. Then, optionally, a second model judging each answer for wrong retellings and dates. The price of a judge: it makes its own mistakes, results stop being repeatable, and a run takes twice as long. Rules stay the reference; a judge would be an extra column.
 
 ## Local models: verify the LM Studio path live
 
