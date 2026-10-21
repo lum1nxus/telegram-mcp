@@ -6,7 +6,7 @@ For anyone who wants to know what tgmcp can see, where it keeps things, how read
 
 tgmcp sees everything your Telegram account sees (private chats, groups, channels, archived chats), except the chats you hide. What a tool returns goes to the model as part of your conversation:
 
-- with Claude Code, or any cloud client, it goes to that company's servers;
+- with a cloud client (for example Claude Code), it goes to that company's servers;
 - with a local model ([local-models.md](local-models.md)), it stays on your PC.
 
 Nothing else leaves the PC: tgmcp talks only to Telegram's servers and, for `tgmcp ask` and `tgmcp bench`, to a model server on this computer. There is no telemetry.
@@ -15,7 +15,7 @@ A chat can contain text that looks like instructions to the model. Every tool te
 
 ## Hidden chats
 
-List the chats the model must not see in `config.json` under `hidden_chats`, by id, @username or exact title:
+List the chats the model must not see in `config.json` under `hidden_chats`, by id, @username or exact title (case does not matter):
 
 ```json
 "hidden_chats": ["-1001234567890", "@somechannel", "Family"]
@@ -38,7 +38,7 @@ One folder: `%LOCALAPPDATA%\telegram-mcp` on Windows, `~/.local/share/telegram-m
 |---|---|
 | `secrets.bin` | the API hash and the login key, encrypted (below) and restricted to your user |
 | `config.json` | settings that are not secret: `api_id`, `hidden_chats`, `expected_user`, `local_model` |
-| `tgmcp-<pid>.log` | a technical log, one file per running server; files older than 7 days are removed |
+| `tgmcp-<pid>.log` | a technical log, one file per running server (`<pid>`: the process number); when a server starts, it removes log files older than 7 days |
 
 There is no `.session` file: the login is kept in memory and saved only inside `secrets.bin`. Nothing from your chats is written to disk. The log holds connection events, chat ids, counts and error types; never message text, chat titles or search words.
 
@@ -73,7 +73,7 @@ Versions before 21.10.2026 kept the API hash in `config.json` and the login in `
 
 ## How read-only is enforced
 
-**At run time.** The server talks to Telegram through `ReadOnlyClient`, which checks every request before it leaves the computer against a short list of reading requests (list dialogs, read history, search, read a channel's details and a forum's topics, plus what connecting needs). Anything else is refused and nothing is sent: tgmcp's own calls, Telethon's helper methods, and the methods of returned objects (a message's `reply` or `delete`). `tgmcp login` and `tgmcp logout` use a second client whose list adds only the sign-in requests and the log-out.
+**At run time.** The server talks to Telegram through Telethon (the library tgmcp uses to talk to Telegram), with `ReadOnlyClient`, which checks every request before it leaves the computer against an allowlist (a fixed list of what is permitted; everything else is refused) of reading requests (list dialogs, read history, search, read a channel's details and a forum's topics, plus what connecting needs). Anything else is refused and nothing is sent: tgmcp's own calls, Telethon's helper methods, and the methods of returned objects (a message's `reply` or `delete`). `tgmcp login` and `tgmcp logout` use a second client whose list adds only the sign-in requests and the log-out.
 
 **In the source.** A test reads every module of the package and fails on write-shaped names (`send`, `delete`, `reply`, `download`, ...), on dynamic tricks that could hide a call (`eval`, `vars`, computed `getattr`, ...), and on any Telethon name inside `tgmcp/telegram/` that is not on an explicit list. The same test sends the forbidden requests to the real client class, without a network, and checks that each one is refused.
 
@@ -89,7 +89,7 @@ Each client session starts its own `tgmcp serve` with its own connection on the 
 
 - The address must be `http`, with the host `127.0.0.1`, `localhost` or `::1` (any port). Anything after the port is dropped.
 - System proxies are bypassed, and a redirect is refused.
-- With Ollama, a model whose name ends in `-cloud` is refused, and so is a model that Ollama marks with a remote host or remote model, or for which it does not report a parameter size and quantization.
+- With Ollama, a model whose name ends in `-cloud` is refused, and so is a model that Ollama marks with a remote host or remote model, or for which it does not report a parameter size and quantization (a smaller, slightly less precise copy of the model).
 - There is no option to turn this off.
 
 With LM Studio, the address check is the whole rule: LM Studio's server does not say where a model runs.

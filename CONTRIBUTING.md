@@ -41,7 +41,7 @@ py -3.14 -m venv .venv
 git config core.hooksPath .githooks
 ```
 
-(On Linux or macOS the interpreter is `.venv/bin/python`.)
+On Linux or macOS, create the environment with `python3.14 -m venv .venv`; the interpreter is then `.venv/bin/python`.
 
 ## The gate
 

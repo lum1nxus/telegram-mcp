@@ -2,7 +2,7 @@
 
 Read-only Telegram MCP server: let any model list, search and read your own chats. Secrets encrypted at rest.
 
-Read-only: it cannot send, edit, delete or mark anything; a test and a runtime allowlist keep it that way. Two ways to connect it are documented: Claude Code, and a model running on your own computer.
+Read-only; the list below says what it never does. It works with any MCP client (MCP: the standard way AI apps plug in tools; for example Claude Code or LM Studio), and `tgmcp ask` answers with a model on your own PC.
 
 ## Who it is for
 
@@ -16,9 +16,9 @@ You need Python 3.14 and Git. The commands are for **cmd.exe**; in Git Bash writ
 1. Get a Telegram API key: open https://my.telegram.org, log in, choose "API development tools", create an application, note `api_id` and `api_hash`.
 2. `git clone https://github.com/lum1nxus/telegram-mcp && cd telegram-mcp`
 3. `py -3.14 -m venv .venv && .venv\Scripts\python -m pip install --require-hashes -r requirements.lock && .venv\Scripts\python -m pip install --no-deps -e .`
-4. `.venv\Scripts\tgmcp login` (it asks for the API id, the API hash, your phone number and the code Telegram sends to the app)
-5. `claude mcp add --scope user telegram -- "%CD%\.venv\Scripts\tgmcp.exe" serve` (Claude Code; other clients: [docs/setup.md](docs/setup.md))
-6. Start a new Claude Code session.
+4. `.venv\Scripts\tgmcp login` (it asks for the API id, the API hash, your phone number, the code Telegram sends (usually inside the Telegram app) and your two-step password if you set one)
+5. `claude mcp add --scope user telegram -- "C:\full\path\telegram-mcp\.venv\Scripts\tgmcp.exe" serve`, with the full path of your cloned folder (`cd` in cmd.exe prints it). This is for Claude Code; other clients: [docs/setup.md](docs/setup.md).
+6. Restart your client (in Claude Code: start a new session).
 
 Then ask your client or model about your chats.
 

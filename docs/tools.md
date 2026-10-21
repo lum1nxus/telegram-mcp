@@ -60,7 +60,7 @@ When a result is cut:
 - `get_message_context` drops the messages farthest from the target first and says `truncated: true`.
 - `list_chats` and `list_topics` return fewer items without a flag: narrow them with `query` or `kind`.
 
-`get_messages` also says `truncated` when it stopped early in a long run of service messages (joins, pins); the cursor then continues below them. A search across all chats says `truncated` when Telegram returned a full page, also if hits from hidden chats were then dropped from it.
+`get_messages` also says `truncated` when it stopped early in a long run of service messages (joins, pins); the cursor then continues below them. A search says `truncated` whenever Telegram returned a full page (`limit` hits), since more may exist; a search across all chats also says it when it stopped early in a long run of service messages, and keeps the flag when hits from hidden chats were then dropped from the page.
 
 A local model gets at most 16 000 characters of each tool answer ([local-models.md](local-models.md#limits)).
 

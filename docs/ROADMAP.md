@@ -1,6 +1,6 @@
 # Roadmap
 
-For anyone curious what may come next. What is worth doing next, with the trade-off of each item. Nothing here is promised. The read-only rule is not on the list and will not be: see [CONTRIBUTING.md](../CONTRIBUTING.md).
+For anyone curious what may come next: ideas worth doing, each with its trade-off, none of them promised; the read-only rule is not up for change (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Local full-text index (SQLite FTS5)
 

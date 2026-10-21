@@ -2,6 +2,8 @@
 
 For anyone who wants a model on their own PC to answer questions about their chats, so that the questions, the messages the tools read and the answers never go to an AI company.
 
+`tgmcp` below means `.venv\Scripts\tgmcp` in cmd.exe or `.venv/Scripts/tgmcp` in Git Bash/PowerShell, run from the cloned folder.
+
 tgmcp itself still fetches messages from Telegram's servers, as always. What "local" checks, and what it cannot see, is in [privacy.md](privacy.md#local-models).
 
 ## What it costs
@@ -16,15 +18,17 @@ Not yet verified live: these steps follow LM Studio's documentation.
 
 1. Install LM Studio from https://lmstudio.ai.
 2. Search for a model from "Which model" below, download it and load it.
-3. When loading, set the context length to at least 8192 (16384 is better if it fits); a shorter context cuts off tool answers.
-4. Open the Program tab, then Install, then Edit mcp.json, and add this inside `mcpServers` (replace `FOLDER` with the full path of your cloned folder; double every backslash):
+3. When loading, set the context length (how much text the model can hold at once, counted in tokens) to at least 8192 (16384 is better if it fits); a shorter context cuts off tool answers.
+4. Open the Program tab, then Install, then Edit mcp.json, and add this inside `mcpServers`, with the full path of your cloned folder (`cd` in cmd.exe, `pwd` in Git Bash or PowerShell) and every backslash doubled:
 
    ```json
    "telegram": {
-     "command": "FOLDER\\.venv\\Scripts\\tgmcp.exe",
+     "command": "C:\\full\\path\\telegram-mcp\\.venv\\Scripts\\tgmcp.exe",
      "args": ["serve"]
    }
    ```
+
+   If `mcpServers` already holds other servers, put a comma after the neighbouring entry. Save the file.
 
 5. In the Developer tab, keep "Serve on local network" off.
 6. Start a new chat and ask. LM Studio asks you to confirm each tool call.
@@ -41,7 +45,7 @@ Not yet verified live: these steps follow LM Studio's documentation.
 3. Ask, from the cloned folder:
 
    ```
-   .venv\Scripts\tgmcp ask "What did Nora say about the boots?" --model gemma4:12b
+   tgmcp ask "What did Nora say about the boots?" --model gemma4:12b
    ```
 
 Only the answer is printed. In Git Bash, a `!` inside double quotes is read as a history command; put such a question in single quotes.
@@ -61,14 +65,14 @@ To make a model the default, add `"local_model": "gemma4:12b"` to `config.json` 
 
 With Ollama, tgmcp asks for a context of 16384 tokens and temperature 0. Each model call may take up to 120 seconds.
 
-If the model does not finish within the steps, tgmcp prints `(unfinished after N steps)` and what the model had so far (or the tool calls it made). Ask a narrower question: one chat, a shorter period.
+If the model does not finish within the steps, or makes two broken tool calls in a row, tgmcp prints `(unfinished after N steps)` and what the model had so far (or the tool calls it made). Ask a narrower question: one chat, a shorter period.
 
 ## Which model works best: `tgmcp bench`
 
 `tgmcp bench` asks a model 30 fixed questions about an invented account built into tgmcp (no login, none of your chats) and checks the answers with fixed rules, not with another model.
 
 ```
-.venv\Scripts\tgmcp bench --model gemma4:12b
+tgmcp bench --model gemma4:12b
 ```
 
 Options: `--model` (required), `--backend`, `--url` and `--think` as for `ask`; `--set smoke` for five questions only; `--repeat N` to ask each question N times (small models do not always answer the same way); `--json FILE` to save every question, tool call, answer and score.
@@ -77,7 +81,7 @@ Options: `--model` (required), `--backend`, `--url` and `--think` as for `ask`; 
 
 The first line names the run: `model=… backend=… ctx=… think=… repeat=…` (with LM Studio, `ctx=app think=n/a`, because LM Studio sets both itself). Compare only runs with the same `ctx`, `think` and `repeat`.
 
-Then one row per kind of question (`lookup`, `history`, `paging`, `context`, `topic`, `hidden`, `refusal`, `multilingual`) and a `total` row. The columns:
+Then one row per kind of question that was run (`lookup`, `history`, `paging`, `context`, `topic`, `hidden`, `refusal`, `multilingual`) and a `total` row. The columns:
 
 | Column | Meaning |
 |---|---|
@@ -102,7 +106,7 @@ Candidates that fit a 12 GB graphics card, all in Ollama's library:
 | Ministral 3, 14 B | `ollama pull ministral-3:14b` |
 | Qwen 3, 14 B | `ollama pull qwen3:14b` |
 
-Measured so far: `gemma4:12b` scored 100 % on `--set smoke`. The full set has not been run on these models yet. Run `tgmcp bench` on the ones that fit your PC and keep the one with the best `total` row. tgmcp refuses a model that Ollama says cannot call tools.
+Measured so far: `gemma4:12b` scored 100 % on `--set smoke` (21.10.2026, ctx=16384, think=off, repeat=1, RTX 4070 Ti). The full set has not been run on these models yet. Run `tgmcp bench` on the ones that fit your PC and keep the one with the best `total` row. tgmcp refuses a model that Ollama says cannot call tools.
 
 ## Limits
 
