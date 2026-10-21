@@ -13,22 +13,40 @@ A read-only Telegram connection for Claude Code.
 - It cannot download media; a message with a photo or a file only shows that one is there.
 - It keeps no copy of your chats on disk. Messages are fetched from Telegram when asked and forgotten afterwards.
 
-## Setup
+## First run
 
-1. Open https://my.telegram.org, log in with your phone number, choose "API development tools" and create an application (any name). Note the `api_id` (a number) and the `api_hash` (a long string).
-2. Create the environment (once):
+Every command below is typed in a terminal: open **Git Bash** or **PowerShell**, then go to the repository folder first:
+
+```
+cd C:\Users\Slava\projects\telegram-mcp
+```
+
+All later commands are run from that folder (they start with `.venv/Scripts/...`, which means "inside this folder").
+
+1. Get an API key. Open https://my.telegram.org, log in with your phone number, choose "API development tools" and create an application (any name and description). Note the `api_id` (a number) and the `api_hash` (a long string of letters and digits).
+2. Create the environment (once). Python 3.14 must be installed:
 
    ```
    py -3.14 -m venv .venv
-   .venv/Scripts/python -m pip install --require-hashes -r requirements-dev.lock
+   .venv/Scripts/python -m pip install --require-hashes -r requirements.lock
    .venv/Scripts/python -m pip install --no-deps -e .
    ```
 
-3. Log in. It asks for the API id and hash (first time only), then Telegram sends a code to your app; type the code, and the 2FA password if you have one:
+3. Log in:
 
    ```
    .venv/Scripts/tgmcp login
    ```
+
+   It asks, in this order:
+   - `API id:` and `API hash:` (first time only). The hash is not shown while you type; paste it and press Enter.
+   - Your phone number, with the country code, for example `+48 600 123 456`.
+   - The code. It arrives as a message **inside the Telegram app** (from the "Telegram" service chat), not by SMS.
+   - Your two-step verification password, only if you have set one in Telegram.
+
+   Telethon (the library tgmcp uses) may print a line about Telegram's Terms of Service; nothing needs to be done. At the end it prints `logged in as <your name>`.
+
+   If you typed the API id or hash wrong, Telegram rejects them; tgmcp forgets them and asks again next time. To replace saved ones by hand: `.venv/Scripts/tgmcp login --reset`.
 
 4. Check that it works:
 
@@ -36,13 +54,23 @@ A read-only Telegram connection for Claude Code.
    .venv/Scripts/tgmcp whoami
    ```
 
-5. Register it with Claude Code:
+   It prints your account, the number of chats and the hidden chats.
+
+5. Register it with Claude Code (once):
 
    ```
    claude mcp add --scope user telegram -- C:\Users\Slava\projects\telegram-mcp\.venv\Scripts\tgmcp.exe serve
    ```
 
-Other commands: `tgmcp logout` ends the login on Telegram and deletes the session file.
+   Then start a new Claude Code session; `telegram` appears in `/mcp`.
+
+Other commands: `.venv/Scripts/tgmcp logout` ends the login on Telegram and deletes the session file.
+
+### If Claude Code shows `telegram ✘ failed`
+
+Open a terminal in the repository folder and run `.venv/Scripts/tgmcp whoami`. It prints one sentence saying what is wrong (for example, "Not logged in: run `tgmcp login` in a terminal."); do what it says, then start a new Claude Code session.
+
+If Claude reports "Telegram no longer accepts this session", run `.venv/Scripts/tgmcp logout`, then `.venv/Scripts/tgmcp login`.
 
 ## Tools
 
@@ -57,13 +85,21 @@ Every tool is read-only and does not reach beyond your account (annotations: rea
 | `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10, 0 to 30), `after` (10, 0 to 30) |
 
+Dates and times are UTC: `since` and `until` of `search_messages` are whole UTC days (both included), and a date and time without a time zone in `get_messages` is taken as UTC. Polish time is UTC+1 in winter and UTC+2 in summer, so a message sent just after midnight in Poland belongs to the previous UTC day.
+
 ## Search semantics
 
 Telegram search matches the beginnings of words, not fragments: "lizing" finds "lizingu", but "zing" finds nothing. When a search finds nothing, try another form of the word before concluding that the message does not exist.
 
 ## Hidden chats
 
-Chats you do not want Claude to see can be hidden. List them (by id, title or @username) in `config.json` under `hidden_chats`, or set the environment variable `TGMCP_HIDDEN_CHATS` to a comma-separated list. Hidden chats never appear in any tool. `tgmcp whoami` shows how many are hidden and whether each entry matched a chat.
+Chats you do not want Claude to see can be hidden. List them (by id, title or @username) in `config.json` under `hidden_chats`, or set the environment variable `TGMCP_HIDDEN_CHATS` to a comma-separated list (an empty variable counts as not set). A hidden chat is left out of every tool: it is not listed, cannot be opened by id, name or title, and global search drops its messages. `tgmcp whoami` shows how many are hidden and whether each entry matched a chat.
+
+What hiding does not cover:
+
+- A message forwarded from a hidden chat into a visible one still shows, and its `forwarded_from` names where it came from.
+- A channel's comments live in its linked discussion group, which holds a copy of every post. Hiding the channel does not hide that group: hide the group too if needed (`get_chat` on the channel shows its `discussion_chat_id`).
+- Hiding a private chat with a person does not hide that person's messages in groups.
 
 ## Where things are stored
 
@@ -71,16 +107,17 @@ Everything lives in one folder: `%LOCALAPPDATA%\telegram-mcp` on Windows (or the
 
 - `config.json`: API id and hash, hidden chats.
 - `telegram.session`: the saved login.
-- `tgmcp.log`: a technical log without message text.
+- `tgmcp-<number>.log`: a technical log without message text, one file per running server (the number is its process id). Files older than 7 days are removed automatically.
 
-The session file is the account: anyone who copies it is logged in as you. Keep it out of git, backups you share and cloud folders. `tgmcp login` restricts the session file to your user. The folder itself is restricted when `tgmcp login` first saves your API id and hash there. If it leaks, run `tgmcp logout`, or end the session in Telegram under Settings, Devices.
+The session file is the account: anyone who copies it is logged in as you. Keep it out of git, backups you share and cloud folders. When tgmcp creates the folder, it makes it readable only by your Windows user (a folder that already exists is left as it is), and `tgmcp login` restricts the session file the same way. If it leaks, run `.venv/Scripts/tgmcp logout`, or end the session in Telegram under Settings, Devices.
 
 ## Several Claude sessions and the VPN caveat
 
-Each Claude Code session starts its own `tgmcp serve`, and each holds its own connection with the same login. That is fine. But Telegram rejects the same login from two IP addresses at once, so switching a VPN in the middle of a session can break it. Then run `tgmcp login` again.
+Each Claude Code session starts its own `tgmcp serve`, and each holds its own connection with the same login. That is fine. But Telegram rejects the same login from two IP addresses at once, so switching a VPN in the middle of a session can break it. Then run `.venv/Scripts/tgmcp logout`, then `.venv/Scripts/tgmcp login`.
 
 ## Development
 
+- Install the development tools instead of step 2's first `pip` line: `.venv/Scripts/python -m pip install --require-hashes -r requirements-dev.lock`.
 - Enable the hook once per clone: `git config core.hooksPath .githooks`. It refuses a commit when `git config user.email` does not end with `@users.noreply.github.com`, and runs `check.py --fast`.
 - Done means `.venv/Scripts/python check.py` exits 0 (formatting, lint, strict types, tests).
 - `serve` never writes to stdout: that channel belongs to the MCP protocol.
