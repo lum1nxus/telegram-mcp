@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import subprocess
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -689,32 +690,22 @@ def _known_login(settings: Settings) -> str | None:
         return None
 
 
-def _temporary_session(path: Path, seed: str | None) -> SQLiteSession:
-    """A fresh SQLite session for Telethon's console login, holding `seed`'s key if given."""
-    _remove_sqlite(path)  # a file left by a crashed login is never reused
-    session = SQLiteSession(str(path))
-    if seed:
-        known = StringSession(seed)
-        session.set_dc(known.dc_id, known.server_address, known.port)
-        session.auth_key = known.auth_key
-    return session
+def _forget_dead_login(settings: Settings) -> None:
+    settings.secrets_path.unlink(missing_ok=True)
+    legacy = settings.legacy_session_path
+    for path in (legacy, legacy.with_name(legacy.name + "-journal")):
+        path.unlink(missing_ok=True)
 
 
-def _remove_sqlite(path: Path) -> None:
-    for name in (path.name, path.name + "-journal"):
-        path.with_name(name).unlink(missing_ok=True)
-
-
-async def _console_login(settings: Settings, api_hash: str) -> tuple[Any, str]:  # noqa: C901
-    """Telethon's console login on a temporary SQLite session; returns the user and the login
-    as a string. The temporary file is removed whatever happens."""
-    temp = settings.home / "login.session"
-    session: SQLiteSession | None = None
+async def _console_login(  # noqa: C901 - one except per case
+    settings: Settings, api_hash: str, seed: str | None
+) -> tuple[Any, str]:
+    """Telethon's console login on an in-memory session: the key never touches the disk in
+    clear text. Returns the user and the login as a string."""
     client: Any = None
     dead = False
     try:
-        session = _temporary_session(temp, _known_login(settings))
-        client = TelegramClient(session, settings.api_id, api_hash)
+        client = TelegramClient(StringSession(seed or None), settings.api_id, api_hash)
         await client.start()
         me = await client.get_me()
         login: str = StringSession.save(client.session)
@@ -722,7 +713,7 @@ async def _console_login(settings: Settings, api_hash: str) -> tuple[Any, str]: 
         raise ApiKeyError(
             "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
         ) from e
-    except _DEAD_KEY as e:  # an existing session file that Telegram no longer accepts
+    except _DEAD_KEY as e:  # an existing login that Telegram no longer accepts
         dead = True
         raise GatewayError(
             "Telegram no longer accepts the old session; it was removed. Run `tgmcp login` again."
@@ -741,25 +732,29 @@ async def _console_login(settings: Settings, api_hash: str) -> tuple[Any, str]: 
         raise GatewayError("Could not reach Telegram: check the network and try again.") from e
     finally:
         if client is not None:
-            await client.disconnect()  # also closes the session file
-        if session is not None:
-            session.close()
-        _remove_sqlite(temp)
+            await client.disconnect()
         if dead:
-            settings.secrets_path.unlink(missing_ok=True)
-            _remove_sqlite(settings.legacy_session_path)
+            _forget_dead_login(settings)
     return me, login
 
 
-async def interactive_login(settings: Settings, api_hash: str) -> Account:
+_NO_PERMISSIONS = (
+    "The login was saved but its file permissions could not be set: "
+    "run `tgmcp login` again or check icacls."
+)
+
+
+async def interactive_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
     """Log in (Telethon asks on the console) and keep the login only in the encrypted secrets
-    file. An existing login (the secrets file, or an old clear-text session file) is reused,
-    so Telegram does not ask for a code again."""
-    me, login = await _console_login(settings, api_hash)
+    file. With `reuse`, an existing login (the secrets file, or an old clear-text session file)
+    is reused, so Telegram does not ask for a code again; `login --reset` passes False."""
+    me, login = await _console_login(settings, api_hash, _known_login(settings) if reuse else None)
     if not login:
         raise GatewayError("Telegram did not finish the login: run `tgmcp login` again.")
     try:
         write_secrets(settings.secrets_path, api_hash, login)
+    except subprocess.CalledProcessError as e:  # icacls failed after the file was written
+        raise GatewayError(_NO_PERMISSIONS) from e
     except OSError as e:
         raise GatewayError(f"Could not save the login in {settings.secrets_path}.") from e
     return Account(id=me.id, name=utils.get_display_name(me), username=me.username)

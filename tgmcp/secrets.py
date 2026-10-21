@@ -9,7 +9,7 @@ payload is stored as it is (`PLAIN`) and only the `0o600` file mode protects it.
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from tgmcp import config
@@ -33,8 +33,8 @@ class NoSecrets(Exception):  # noqa: N818 - a state, not a failure
 
 @dataclass(frozen=True)
 class Secrets:
-    api_hash: str
-    session: str
+    api_hash: str = field(repr=False)  # never in a log line or a traceback
+    session: str = field(repr=False)
 
 
 if sys.platform == "win32":
@@ -46,15 +46,43 @@ if sys.platform == "win32":
     class _Blob(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
 
+    _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _blob_p = ctypes.POINTER(_Blob)
+    _protect_fn = _crypt32.CryptProtectData
+    _protect_fn.argtypes = [
+        _blob_p,
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        _blob_p,
+    ]
+    _protect_fn.restype = wintypes.BOOL
+    _unprotect_fn = _crypt32.CryptUnprotectData
+    _unprotect_fn.argtypes = [
+        _blob_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        _blob_p,
+    ]
+    _unprotect_fn.restype = wintypes.BOOL
+    _local_free = _kernel32.LocalFree
+    _local_free.argtypes = [ctypes.c_void_p]
+    _local_free.restype = ctypes.c_void_p
+
     def _dpapi(data: bytes, *, encrypt: bool) -> bytes:
         """`CryptProtectData` or `CryptUnprotectData`, user scope, no optional entropy (a
         constant in a public repository protects nothing). Raises OSError on failure."""
         buffer = ctypes.create_string_buffer(data, len(data))
         blob_in = _Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
         blob_out = _Blob()
-        crypt32 = ctypes.windll.crypt32
         if encrypt:
-            ok = crypt32.CryptProtectData(
+            ok = _protect_fn(
                 ctypes.byref(blob_in),
                 "tgmcp",
                 None,
@@ -64,7 +92,7 @@ if sys.platform == "win32":
                 ctypes.byref(blob_out),
             )
         else:
-            ok = crypt32.CryptUnprotectData(
+            ok = _unprotect_fn(
                 ctypes.byref(blob_in),
                 None,
                 None,
@@ -74,11 +102,11 @@ if sys.platform == "win32":
                 ctypes.byref(blob_out),
             )
         if not ok:
-            raise ctypes.WinError()
+            raise ctypes.WinError(ctypes.get_last_error())
         try:
             return ctypes.string_at(blob_out.pbData, blob_out.cbData)
         finally:
-            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+            _local_free(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
 
 
 def protect(data: bytes) -> bytes:
@@ -101,11 +129,16 @@ def unprotect(blob: bytes) -> bytes:
 def write_secrets(path: Path, api_hash: str, session: str) -> None:
     """Replace the secrets file atomically, then restrict it to the owner."""
     payload = json.dumps({"v": VERSION, "api_hash": api_hash, "session": session})
+    blob = protect(payload.encode("utf-8"))
     temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
-    with os.fdopen(fd, "wb") as out:
-        out.write(protect(payload.encode("utf-8")))
-    os.replace(temp, path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    try:
+        with os.fdopen(os.open(temp, flags, 0o600), "wb") as out:
+            out.write(blob)
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
     config.restrict_to_owner(path)
 
 

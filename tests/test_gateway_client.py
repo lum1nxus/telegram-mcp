@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -370,15 +371,20 @@ async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway)
 class LoginClient:
     """Stands in for TelegramClient in interactive_login; a successful start stores a key."""
 
-    error: Exception | None = None
+    error: BaseException | None = None
     disconnects = 0
     had_key: bool | None = None
+    home: Path | None = None
 
-    def __init__(self, session: SQLiteSession, api_id: int, api_hash: str) -> None:
+    def __init__(self, session: StringSession, api_id: int, api_hash: str) -> None:
+        assert isinstance(session, StringSession)  # in memory: no SQLite file
         self.session = session
 
     async def start(self) -> None:
         LoginClient.had_key = self.session.auth_key is not None
+        assert LoginClient.home is not None
+        written = [f for f in LoginClient.home.glob("*.session*") if f.name[:9] != "telegram."]
+        assert written == []  # nothing on disk mid-login except an old file the test planted
         if LoginClient.error is not None:
             raise LoginClient.error
         if self.session.auth_key is None:
@@ -400,6 +406,7 @@ def login_settings(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Settings:
     LoginClient.error = None
     LoginClient.disconnects = 0
     LoginClient.had_key = None
+    LoginClient.home = tmp_path
     return Settings(api_id=1, api_hash=None, hidden_chats=(), expected_user=None, home=tmp_path)
 
 
@@ -469,14 +476,25 @@ async def test_login_moves_the_old_session_file(login_settings: Settings):
     assert LoginClient.had_key is True
     saved = secrets.read_secrets(login_settings.secrets_path)
     assert StringSession(saved.session).auth_key.key == b"" * 256
-    assert "login.session" not in _files(login_settings.home)
+    assert _files(login_settings.home) == ["secrets.bin", "telegram.session"]  # CLI removes it
 
 
-async def test_login_discards_a_leftover_temporary_file(login_settings: Settings):
-    (login_settings.home / "login.session").write_bytes(b"junk from a crashed login")
-    await gateway.interactive_login(login_settings, "h")
+async def test_login_without_reuse_starts_fresh(login_settings: Settings):
+    _legacy_session(login_settings.legacy_session_path)
+    secrets.write_secrets(login_settings.secrets_path, "h", make_session_string())
+    await gateway.interactive_login(login_settings, "h", reuse=False)
     assert LoginClient.had_key is False
-    assert _files(login_settings.home) == ["secrets.bin"]
+    saved = secrets.read_secrets(login_settings.secrets_path)
+    assert StringSession(saved.session).auth_key.key == b"" * 256
+
+
+async def test_login_whose_permissions_fail_says_so(login_settings: Settings, monkeypatch):
+    def icacls_fails(path: Path) -> None:
+        raise subprocess.CalledProcessError(1, ["icacls"])
+
+    monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
+    with pytest.raises(GatewayError, match="file permissions could not be set"):
+        await gateway.interactive_login(login_settings, "h")
 
 
 async def test_interrupted_login_leaves_no_temporary_file(login_settings: Settings):

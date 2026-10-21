@@ -28,6 +28,28 @@ def test_protect_round_trip_hides_the_data():
 
 
 @windows_only
+def test_garbage_is_a_secrets_error():
+    with pytest.raises(secrets.SecretsError, match="cannot be decrypted"):
+        secrets.unprotect(b"garbage")
+
+
+def test_repr_hides_the_values():
+    text = repr(secrets.Secrets(api_hash=HASH, session=SESSION))
+    assert HASH not in text
+    assert SESSION not in text
+
+
+def test_failed_write_leaves_no_temporary_file(tmp_path: Path, monkeypatch):
+    def broken(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(secrets.os, "replace", broken)
+    with pytest.raises(OSError):
+        secrets.write_secrets(tmp_path / "secrets.bin", HASH, SESSION)
+    assert list(tmp_path.iterdir()) == []
+
+
+@windows_only
 def test_tampered_blob_is_a_secrets_error():
     blob = bytearray(secrets.protect(b"the login key"))
     blob[-1] ^= 0xFF

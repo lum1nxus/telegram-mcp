@@ -46,7 +46,7 @@ All later commands are run from that folder (they start with `.venv/Scripts/...`
 
    Telethon (the library tgmcp uses) may print a line about Telegram's Terms of Service; nothing needs to be done. At the end it prints `logged in as <your name>`.
 
-   If you typed the API id or hash wrong, Telegram rejects them; tgmcp forgets them and asks again next time. To replace saved ones by hand: `.venv/Scripts/tgmcp login --reset` (it also forgets the saved login, so Telegram sends a new code).
+   If you typed the API id or hash wrong, Telegram rejects them; tgmcp forgets them and asks again next time. To replace saved ones by hand: `.venv/Scripts/tgmcp login --reset` (it also forgets the saved login, so Telegram sends a new code; the old login stays in Telegram's Settings, Devices list until you end it there, or run `tgmcp logout` before `--reset`).
 
 4. Check that it works:
 
@@ -105,7 +105,7 @@ What hiding does not cover:
 
 Everything lives in one folder: `%LOCALAPPDATA%\telegram-mcp` on Windows (or the folder in `TGMCP_HOME`).
 
-- `secrets.bin`: the API hash and the login key, encrypted with Windows DPAPI for your Windows user account. A copy is useless on another PC or under another Windows user. It still opens for any program running as you, so keep the PC clean.
+- `secrets.bin`: the API hash and the login key, encrypted with Windows DPAPI for your Windows user account. A copy is useless on another PC or under another Windows user, unless the attacker also has your Windows profile's DPAPI master keys and your password (a full profile backup). It still opens for any program running as you, so keep the PC clean.
 - `config.json`: the settings that are not secret: API id, hidden chats.
 - `tgmcp-<number>.log`: a technical log without message text, one file per running server (the number is its process id). Files older than 7 days are removed automatically.
 
@@ -113,7 +113,7 @@ When tgmcp creates the folder, it makes it readable only by your Windows user (a
 
 If an administrator resets your Windows password (instead of you changing it yourself), Windows may no longer be able to decrypt `secrets.bin`. tgmcp then says so; run `.venv/Scripts/tgmcp login` again.
 
-Versions before 21.10.2026 kept the hash in `config.json` and the login in `telegram.session`, both in clear text. If those files are still there, tgmcp says "Old clear-text files found"; run `.venv/Scripts/tgmcp login` once. It moves the existing login into `secrets.bin` (no new code from Telegram) and removes the old files.
+Versions before 21.10.2026 kept the hash in `config.json` and the login in `telegram.session`, both in clear text. If those files are still there, tgmcp says "Old clear-text files found"; run `.venv/Scripts/tgmcp login` once. It moves the existing login into `secrets.bin` (no new code from Telegram) and removes the old files. Removing them does not shred them: copies in backups, cloud sync or Windows shadow copies stay valid until you run `.venv/Scripts/tgmcp logout`.
 
 ## Several Claude sessions and the VPN caveat
 

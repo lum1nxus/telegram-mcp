@@ -100,7 +100,7 @@ def _login(reset: bool = False) -> int:
         return 1
     ensure_home(settings.home)
     try:
-        account = asyncio.run(interactive_login(settings, api_hash))
+        account = asyncio.run(interactive_login(settings, api_hash, reuse=not reset))
     except GatewayError as exc:
         if isinstance(exc, ApiKeyError):  # wrong id or hash: keeping them would fail again
             forget_credentials(settings.home)
