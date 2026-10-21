@@ -7,10 +7,10 @@ import pytest
 
 from tgmcp.host.backends import (
     BackendError,
+    ModelTurn,
     OllamaBackend,
     OpenAICompatBackend,
     RemoteRefused,
-    Reply,
     ToolCall,
     local_only,
     make_backend,
@@ -111,7 +111,7 @@ def test_ollama_chat_parses_tool_calls_and_drops_thinking() -> None:
     backend = OllamaBackend("gemma4:12b", opener=opener)
     reply = asyncio.run(backend.chat([{"role": "user", "content": "q"}], TOOLS))
     assert reply.text == "ok"
-    assert reply.tool_calls == [ToolCall("call_0", "search_messages", {"query": "лифт"})]
+    assert reply.tool_calls == (ToolCall("call_0", "search_messages", {"query": "лифт"}),)
     method, path, body = opener.requests[0]
     assert (method, path) == ("POST", "/api/chat")
     assert body["stream"] is False
@@ -138,7 +138,7 @@ def test_ollama_messages_pass_through_and_reply_keeps_raw() -> None:
     opener = Opener({"POST /api/chat": {"message": {"content": "done"}}})
     msgs = [{"role": "tool", "content": "text", "tool_name": "chats"}]
     reply = asyncio.run(OllamaBackend("m", opener=opener).chat(msgs, TOOLS))
-    assert reply == Reply("done", [], {"message": {"content": "done"}})
+    assert reply == ModelTurn("done", (), {"message": {"content": "done"}})
     assert opener.requests[0][2]["messages"] == msgs
 
 
@@ -243,7 +243,7 @@ def test_openai_parses_string_arguments_and_drops_reasoning() -> None:
     )
     reply = asyncio.run(OpenAICompatBackend("m", opener=opener).chat([], TOOLS))
     assert reply.text == "hi"
-    assert reply.tool_calls == [ToolCall("abc", "chats", {"limit": 3})]
+    assert reply.tool_calls == (ToolCall("abc", "chats", {"limit": 3}),)
     method, path, body = opener.requests[0]
     assert (method, path) == ("POST", "/v1/chat/completions")
     assert body["temperature"] == 0

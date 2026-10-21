@@ -82,7 +82,6 @@ ALLOWED_NAMES = frozenset(
         "Mapping",
         "isdisjoint",
         "sender_name",
-        "Reply",  # tgmcp.host.backends.Reply: the local model's answer, a frozen dataclass
         "reply_to_id",
         "forwarded_from",
         "sender",
