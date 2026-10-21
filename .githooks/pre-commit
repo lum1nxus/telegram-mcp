@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run check.py --fast when a commit touches code, tests or the gate itself. A commit never skips
+# this hook (--no-verify is a rule breach).
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+if ! git diff --cached --quiet -- tgmcp/ tests/ check.py pyproject.toml requirements.lock requirements-dev.lock; then
+  root="$(git rev-parse --show-toplevel)"
+  py="$root/.venv/Scripts/python"
+  [ -x "$py" ] || py="$root/.venv/bin/python"
+  if [ ! -x "$py" ]; then echo "create .venv first" >&2; exit 1; fi
+  "$py" "$root/check.py" --fast
+fi
