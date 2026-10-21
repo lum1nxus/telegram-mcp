@@ -17,9 +17,11 @@ from telethon.tl import functions, types
 
 from tests.factories import make_session_string
 from tests.test_gateway_mappers import WHEN, _channel, _dialog
-from tgmcp import config, gateway, secrets
+from tgmcp import config, secrets
 from tgmcp.config import Settings
-from tgmcp.gateway import ApiKeyError, Busy, GatewayError, TelethonGateway
+from tgmcp.gateway import ApiKeyError, Busy, GatewayError
+from tgmcp.telegram import auth
+from tgmcp.telegram.live import TelethonGateway
 
 FORUM_ID = -1000000001005
 
@@ -106,14 +108,14 @@ class StubClient:
 @pytest.fixture
 async def gw(tmp_path: Any) -> AsyncIterator[TelethonGateway]:
     settings = Settings(api_id=1, api_hash="a", hidden_chats=(), expected_user=None, home=tmp_path)
-    gateway = TelethonGateway(settings, "")
-    gateway._tg = StubClient()
+    gateway = TelethonGateway(settings, "", client=StubClient())
     yield gateway
     await gateway.close()
 
 
 def _stub(gw: TelethonGateway) -> StubClient:
-    client: StubClient = gw._tg
+    # The gateway keeps its client name-mangled so no tool can reach it; a test may.
+    client: StubClient = gw._TelethonGateway__client  # type: ignore[attr-defined]
     return client
 
 
@@ -310,7 +312,7 @@ async def test_mapping_bug_is_internal_error_with_traceback(
 ):
     broken = types.Message(id=9, peer_id=types.PeerChannel(1005), date=None, message="x")
     _stub(gw).messages["plain"] = [broken]
-    caplog.set_level(logging.ERROR, logger="tgmcp.gateway")
+    caplog.set_level(logging.ERROR, logger="tgmcp.telegram.errors")
     with pytest.raises(GatewayError) as caught:
         await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=5)
     assert str(caught.value) == "Internal error in the Telegram gateway: ValidationError."
@@ -376,7 +378,7 @@ class LoginClient:
     had_key: bool | None = None
     home: Path | None = None
 
-    def __init__(self, session: StringSession, api_id: int, api_hash: str) -> None:
+    def __init__(self, session: StringSession, api_id: int, api_hash: str, **_kw: Any) -> None:
         assert isinstance(session, StringSession)  # in memory: no SQLite file
         self.session = session
 
@@ -401,7 +403,7 @@ class LoginClient:
 
 @pytest.fixture
 def login_settings(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setattr(gateway, "TelegramClient", LoginClient)
+    monkeypatch.setattr(auth, "AuthClient", LoginClient)
     monkeypatch.setattr(config, "restrict_to_owner", lambda path: None)
     LoginClient.error = None
     LoginClient.disconnects = 0
@@ -426,7 +428,7 @@ def _legacy_session(path: Path) -> None:
 async def test_login_maps_wrong_api_key(login_settings: Settings):
     LoginClient.error = errors.ApiIdInvalidError(request=None)
     with pytest.raises(ApiKeyError, match=r"tgmcp login --reset"):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert LoginClient.disconnects == 1
     assert _files(login_settings.home) == []
 
@@ -434,7 +436,7 @@ async def test_login_maps_wrong_api_key(login_settings: Settings):
 async def test_login_maps_three_wrong_codes(login_settings: Settings):
     LoginClient.error = RuntimeError("3 consecutive sign-in attempts failed. Aborting")
     with pytest.raises(GatewayError) as caught:
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert str(caught.value) == "The code was wrong three times: run `tgmcp login` again."
     assert _files(login_settings.home) == []
 
@@ -447,13 +449,13 @@ async def test_login_removes_a_dead_session(login_settings: Settings, error: Exc
     secrets.write_secrets(login_settings.secrets_path, "h", make_session_string())
     LoginClient.error = error
     with pytest.raises(GatewayError, match="it was removed"):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert _files(login_settings.home) == []
     assert LoginClient.disconnects == 1
 
 
 async def test_login_writes_encrypted_secrets_and_no_session_file(login_settings: Settings):
-    account = await gateway.interactive_login(login_settings, "the-hash")
+    account = await auth.interactive_login(login_settings, "the-hash")
     assert (account.name, account.username) == ("Alex", "alex")
     assert LoginClient.had_key is False
     assert _files(login_settings.home) == ["secrets.bin"]
@@ -465,14 +467,14 @@ async def test_login_writes_encrypted_secrets_and_no_session_file(login_settings
 async def test_login_reuses_the_saved_login(login_settings: Settings):
     old = make_session_string()
     secrets.write_secrets(login_settings.secrets_path, "h", old)
-    await gateway.interactive_login(login_settings, "h")
+    await auth.interactive_login(login_settings, "h")
     assert LoginClient.had_key is True
     assert secrets.read_secrets(login_settings.secrets_path).session == old
 
 
 async def test_login_moves_the_old_session_file(login_settings: Settings):
     _legacy_session(login_settings.legacy_session_path)
-    await gateway.interactive_login(login_settings, "h")
+    await auth.interactive_login(login_settings, "h")
     assert LoginClient.had_key is True
     saved = secrets.read_secrets(login_settings.secrets_path)
     assert StringSession(saved.session).auth_key.key == b"" * 256
@@ -482,7 +484,7 @@ async def test_login_moves_the_old_session_file(login_settings: Settings):
 async def test_login_without_reuse_starts_fresh(login_settings: Settings):
     _legacy_session(login_settings.legacy_session_path)
     secrets.write_secrets(login_settings.secrets_path, "h", make_session_string())
-    await gateway.interactive_login(login_settings, "h", reuse=False)
+    await auth.interactive_login(login_settings, "h", reuse=False)
     assert LoginClient.had_key is False
     saved = secrets.read_secrets(login_settings.secrets_path)
     assert StringSession(saved.session).auth_key.key == b"" * 256
@@ -494,13 +496,13 @@ async def test_login_whose_permissions_fail_says_so(login_settings: Settings, mo
 
     monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
     with pytest.raises(GatewayError, match="file permissions could not be set"):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
 
 
 async def test_interrupted_login_leaves_no_temporary_file(login_settings: Settings):
     LoginClient.error = KeyboardInterrupt()  # Ctrl-C at the code prompt
     with pytest.raises(KeyboardInterrupt):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert _files(login_settings.home) == []
 
 
@@ -508,9 +510,9 @@ async def test_login_that_cannot_save_says_so(login_settings: Settings, monkeypa
     def full_disk(path: Path, api_hash: str, session: str) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(gateway, "write_secrets", full_disk)
+    monkeypatch.setattr(auth, "write_secrets", full_disk)
     with pytest.raises(GatewayError, match="Could not save the login"):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert _files(login_settings.home) == []
 
 
@@ -520,5 +522,5 @@ async def test_login_without_a_key_is_not_saved(login_settings: Settings, monkey
 
     monkeypatch.setattr(LoginClient, "start", no_key)
     with pytest.raises(GatewayError, match="did not finish"):
-        await gateway.interactive_login(login_settings, "h")
+        await auth.interactive_login(login_settings, "h")
     assert _files(login_settings.home) == []

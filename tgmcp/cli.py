@@ -19,17 +19,10 @@ from tgmcp.config import (
     remove_legacy_files,
     save_credentials,
 )
-from tgmcp.gateway import (
-    MIGRATE,
-    ApiKeyError,
-    GatewayError,
-    NotLoggedIn,
-    end_session,
-    factory,
-    interactive_login,
-)
+from tgmcp.gateway import MIGRATE, ApiKeyError, GatewayError, NotLoggedIn
 from tgmcp.resolve import Directory
 from tgmcp.server import build_server
+from tgmcp.telegram import end_session, factory, interactive_login
 
 ATTEMPTS = 3
 PLAIN_WARNING = "warning: secrets are not encrypted on this platform (file permissions only)"

@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from tgmcp.gateway import LIBRARY_LOGGER
+from tgmcp.config import LIBRARY_LOGGER
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 KEEP_DAYS = 7

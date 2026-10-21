@@ -7,12 +7,8 @@ from tests.factories import make_chat, make_session_string
 from tests.fake_gateway import FakeGateway
 from tgmcp import cli, config, secrets
 from tgmcp.config import Settings
-from tgmcp.gateway import ApiKeyError, GatewayError
+from tgmcp.gateway import MIGRATE, ApiKeyError, GatewayError
 from tgmcp.models import Account
-
-MIGRATE = (
-    "Old clear-text files found: run `tgmcp login` once to move them into the encrypted store."
-)
 
 
 @pytest.fixture

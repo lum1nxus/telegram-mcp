@@ -11,7 +11,9 @@ from telethon.sessions import SQLiteSession, StringSession
 from tests.factories import make_session_string
 from tgmcp import config, gateway, logging_setup, secrets
 from tgmcp.config import Settings
-from tgmcp.gateway import NotLoggedIn, load_session_string
+from tgmcp.gateway import NotLoggedIn
+from tgmcp.telegram import auth, client, live
+from tgmcp.telegram.auth import load_session_string
 
 
 def test_missing_session_is_not_logged_in(tmp_path: Path):
@@ -122,7 +124,8 @@ class Recorder:
 @pytest.fixture
 def stored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setattr(config, "restrict_to_owner", lambda path: None)
-    monkeypatch.setattr(gateway, "TelegramClient", Recorder)
+    monkeypatch.setattr(client, "ReadOnlyClient", Recorder)
+    monkeypatch.setattr(auth, "AuthClient", Recorder)
     Recorder.built = []
     Recorder.log_outs = 0
     return Settings(api_id=7, api_hash=None, hidden_chats=(), expected_user=None, home=tmp_path)
@@ -130,14 +133,14 @@ def stored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
 
 def test_factory_without_secrets_is_not_logged_in(stored: Settings):
     with pytest.raises(NotLoggedIn) as caught:
-        gateway.factory(stored)
+        live.factory(stored)
     assert str(caught.value) == "Not logged in: run `tgmcp login` in a terminal."
 
 
 def test_factory_with_only_old_files_asks_to_move_them(stored: Settings):
     stored.legacy_session_path.write_bytes(b"old")
     with pytest.raises(NotLoggedIn) as caught:
-        gateway.factory(stored)
+        live.factory(stored)
     assert str(caught.value) == gateway.MIGRATE
 
 
@@ -149,20 +152,20 @@ def test_factory_with_undecryptable_secrets(stored: Settings, monkeypatch):
 
     monkeypatch.setattr(secrets, "unprotect", refuse)
     with pytest.raises(NotLoggedIn, match="cannot be decrypted"):
-        gateway.factory(stored)
+        live.factory(stored)
 
 
 def test_factory_takes_the_hash_from_the_secrets_unless_overridden(stored: Settings):
     text = make_session_string()
     secrets.write_secrets(stored.secrets_path, "stored-hash", text)
-    gateway.factory(stored)
-    gateway.factory(dataclasses.replace(stored, api_hash="env-hash"))
+    live.factory(stored)
+    live.factory(dataclasses.replace(stored, api_hash="env-hash"))
     assert Recorder.built == [(text, 7, "stored-hash"), (text, 7, "env-hash")]
 
 
 async def test_end_session_uses_the_stored_login(stored: Settings):
     text = make_session_string()
     secrets.write_secrets(stored.secrets_path, "stored-hash", text)
-    await gateway.end_session(stored)
+    await auth.end_session(stored)
     assert Recorder.built == [(text, 7, "stored-hash")]
     assert Recorder.log_outs == 1
