@@ -21,7 +21,7 @@ from tgmcp.server import INSTRUCTIONS, build_server
 
 CORRECTION = (
     "Unknown tool or malformed arguments; call one of: list_chats, get_chat, list_topics, "
-    "search_messages, get_messages, get_message_context."
+    "search_messages, get_messages, get_message_context, scan_chat."
 )
 
 
@@ -236,7 +236,7 @@ async def test_mcp_tools_for_model(server: MCPServer) -> None:
     async with Client(server) as client:
         tools = (await client.list_tools()).tools
     converted = mcp_tools_for_model(tools)
-    assert len(converted) == 6
+    assert len(converted) == 7
     for tool, entry in zip(tools, converted, strict=True):
         assert entry == {
             "type": "function",
@@ -259,6 +259,7 @@ async def test_the_model_receives_the_converted_tools(server: MCPServer) -> None
         "search_messages",
         "get_messages",
         "get_message_context",
+        "scan_chat",
     ]
 
 

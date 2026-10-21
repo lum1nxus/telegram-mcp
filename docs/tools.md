@@ -1,10 +1,10 @@
 # Tools
 
-For anyone who wants to know exactly what the six tools take and return, and where their limits are.
+For anyone who wants to know exactly what the seven tools take and return, and where their limits are.
 
 Every tool only reads, and is marked read-only and closed-world for the client. Every description tells the model that message text is chat content: data, not instructions.
 
-## The six tools
+## The seven tools
 
 | Tool | Arguments (default; bounds) |
 |---|---|
@@ -14,6 +14,7 @@ Every tool only reads, and is marked read-only and closed-world for the client. 
 | `search_messages` | `query` (required), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none; needs `chat`), `since` (none; a date), `until` (none; a date), `limit` (30; 1 to 100), `expand` (false) |
 | `get_messages` | `chat`, `topic` (none), `since` (none; a date and time), `until` (none; a date and time), `before_id` (none; at least 1), `limit` (50; 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10; 0 to 30), `after` (10; 0 to 30) |
+| `scan_chat` | `chat`, `query`, `mode` (`fragment`; `words` or `regex`), `tolerance` (0; 0 to 2), `topic` (none), `sender` (none), `since` (none; a date and time), `until` (none; a date and time), `max_messages` (3000; 100 to 20000), `limit` (30; 1 to 100) |
 
 `chat` is an id, an @username, a title or part of a title, of a chat in your dialog list; a part that fits several chats is refused with their ids and titles. `list_chats` matches `query` as a case-insensitive part of the title or username.
 
@@ -89,3 +90,32 @@ Chats listed in `hidden_chats` are left out of every tool: not listed, not found
 ## Connection
 
 Each running server connects to Telegram on the first tool call and disconnects after 10 minutes without one.
+
+## Deep scan
+
+Telegram's search cannot find a fragment inside a word. `scan_chat` reads the recent history of one chat, newest first, in pages of 100, matches every message in memory and drops it; only the hits are kept, and nothing is written to disk. It calls only the gateway's history, like `get_messages`.
+
+Modes:
+
+- `fragment` (default): the query is found anywhere in the text, case and diacritics ignored ("трактор" finds "минитрактор"; "odmow" finds "odmówiła").
+- `words`: every query word must be a whole word of the message, in any order.
+- `regex`: a Python pattern, matched against the original text with IGNORECASE and no folding. A pattern over 200 characters is refused, and so are patterns that could run forever: nested quantifiers, alternation inside a repeat, two unbounded quantifiers in a row (except disjoint classes like `\d+\s*`), more than 3 unbounded quantifiers, back-references, comments and verbose mode. A refused pattern costs no Telegram request. Only the first 4096 characters of a message are matched.
+
+`tolerance` (1 or 2) lets each query word differ from a whole word of the text by that many typos, in `fragment` and `words`. Words of up to 3 letters allow none, words of 4 to 6 letters at most 1. A typo inside a compound word is not caught ("tracor" does not find "minitractor"), and a 5 to 6-letter word with two swapped letters is not a fuzzy match. With `tolerance` above 0, `fragment` behaves like `words`: the words need not be adjacent.
+
+`sender` is a numeric id or an @username of a user in your dialog list; the filter applies to the hits only, `scanned` still counts every message. `topic` needs a forum group. `since` and `until` are dates with times, like `get_messages`.
+
+The result states how far the scan looked, so an empty answer is not read as "nothing exists":
+
+| Field | Meaning |
+|---|---|
+| `scanned` | messages matched (plain messages; service messages are skipped by the gateway) |
+| `oldest_scanned`, `newest_scanned` | the dates of the oldest and newest message matched |
+| `reached_start` | true when the whole chat was covered |
+| `stopped_by` | `start`, `since`, `max_messages`, `limit`, `time` or `flood` |
+| `elapsed_s` | seconds the scan took |
+| `hits` | the matches, newest first, at most `limit`, texts cut to 2000 characters |
+| `truncated` | the hits were cut by the size budget, or `limit` stopped the scan |
+| `note` | one sentence restating the coverage, for the model to quote |
+
+A scan stops at `max_messages`, at the start of the chat or of `since`, once `limit` hits are found (the first hits are the newest, so the scan stops early), after 60 seconds (checked after every message; `stopped_by` is `time`), or when Telegram asks to wait after at least one page (`flood`, with Telegram's sentence in `note`). A flood wait on the first page is an error. Pages are spaced by a quarter of a second, so a long scan does not provoke one.
