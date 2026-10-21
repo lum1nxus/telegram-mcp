@@ -62,7 +62,11 @@ def seed() -> FakeGateway:
     ]
     return FakeGateway(
         chats,
-        {-1001: _leasing_messages(), -1005: forum},
+        {
+            -1001: _leasing_messages(),
+            -1005: forum,
+            -1007: [make_message(1, chat_id=-1007, text="lizing secret terms")],
+        },
         {-1005: [make_topic(1, title="General"), make_topic(7, title="Cars")]},
     )
 
