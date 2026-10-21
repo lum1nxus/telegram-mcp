@@ -5,6 +5,7 @@ import re
 import pytest
 
 from tgmcp.match import (
+    LARGE_REPEAT,
     MAX_PATTERN_CHARS,
     MAX_TEXT_CHARS_MULTI,
     MAX_TEXT_CHARS_TRIPLE,
@@ -143,6 +144,32 @@ def test_two_unbounded_quantifiers_match_the_first_1024_characters() -> None:
     assert not regex(compiled, "x" * 1024 + "teplica, cena 100 zł")
     assert compile_pattern(".*teplic.*cena").unbounded == 1  # the leading .* is stripped
     assert regex(compiled, "x" * 1000 + "teplica, cena 100 zł")
+
+
+def test_disjoint_pairs_do_not_lower_the_text_cap() -> None:
+    compiled = compile_pattern(r"\d+\s*zł")
+    assert compiled.unbounded == 1
+    assert regex(compiled, "cena " + "x" * 1500 + " 1234 zł")
+    overlapping = compile_pattern("a.*a.*c")
+    assert overlapping.unbounded == 2
+    assert regex(overlapping, "x" * 1000 + "aac")
+    assert not regex(overlapping, "x" * 1100 + "aac")
+
+
+@pytest.mark.parametrize("pattern", ["a{2,3}b", r"\d{1,4} zł", ".{0,20}cena", "a{1,20}b"])
+def test_small_bounded_repeats_stay_bounded(pattern: str) -> None:
+    assert compile_pattern(pattern).unbounded == 0
+
+
+def test_large_bounded_repeats_count_as_unbounded() -> None:
+    assert LARGE_REPEAT == 20
+    compiled = compile_pattern(".{0,500}a.{0,500}a.{0,500}c")
+    assert compiled.unbounded == 3
+    assert compile_pattern("teplic.{0,21}cena").unbounded == 1
+    assert compile_pattern("teplic.{,50}?cena").unbounded == 1
+    for pattern in ("a{1,200}a{1,200}a{1,200}c", "a{0,30}+a*c", "teplic.{0,50}.{0,50}cena"):
+        with pytest.raises(PatternRefused, match="could run forever"):
+            compile_pattern(pattern)
 
 
 def test_three_unbounded_quantifiers_match_the_first_256_characters() -> None:

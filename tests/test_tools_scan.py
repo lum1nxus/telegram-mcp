@@ -354,6 +354,8 @@ async def test_annotations_description_and_seven_tools(client: Client) -> None:
         "conditionals",
         "first 1024 characters",
         "first 256",
+        "stops at 50 seconds",
+        "60 seconds is the hard ceiling",
     ):
         assert phrase in description
     assert scan.input_schema["properties"]["max_messages"]["default"] == 3000
@@ -450,7 +452,7 @@ async def test_note_under_until_names_the_scope(settings: Settings) -> None:
     data = _data(await _scan(gateway, settings, query="greenhouse", until=until.isoformat()))
     assert data["stopped_by"] == "start"
     assert data["reached_start"] is True
-    assert f"up to {until:%Y-%m-%d}" in data["note"]
+    assert f"up to {until:%Y-%m-%d %H:%M}" in data["note"]
     assert "whole chat" not in data["note"]
     assert data["note"].endswith("everything in that scope was covered.")
 
@@ -464,7 +466,7 @@ async def test_note_under_topic_names_the_scope(settings: Settings) -> None:
     data = _data(
         await _scan(gateway, settings, query="greenhouse", topic=7, until=until.isoformat())
     )
-    assert f"in topic 7 up to {until:%Y-%m-%d}" in data["note"]
+    assert f"in topic 7 up to {until:%Y-%m-%d %H:%M}" in data["note"]
 
 
 async def test_note_under_scope_says_newest_for_max_messages(settings: Settings) -> None:
@@ -474,7 +476,7 @@ async def test_note_under_scope_says_newest_for_max_messages(settings: Settings)
     )
     assert data["stopped_by"] == "max_messages"
     assert data["note"].startswith(
-        f"Scanned the 200 newest messages of 'Plot' up to {_NOW:%Y-%m-%d}"
+        f"Scanned the 200 newest messages of 'Plot' up to {_NOW:%Y-%m-%d %H:%M}"
     )
 
 

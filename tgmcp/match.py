@@ -36,6 +36,7 @@ SHORT_WORD = 3  # up to this many letters: no tolerance
 MEDIUM_WORD = 6  # up to this many letters: tolerance at most 1
 MAX_TOLERANCE = 2
 MAX_UNBOUNDED = 3  # unbounded quantifiers a pattern may hold
+LARGE_REPEAT = 20  # a bounded repeat `{n,m}` with m above this counts as unbounded
 
 _WORD = re.compile(r"\w+")
 _BACK_REFERENCE = re.compile(r"\\[1-9]|\(\?P=")
@@ -43,6 +44,7 @@ _ESCAPE = re.compile(r"\\.", re.DOTALL)
 _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
 _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
+_BOUNDED_RANGE = re.compile(r"\{\d*,(\d+)\}[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
 _LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{]|\.[*+])")
 _VERBOSE_OR_COMMENT = re.compile(r"\(\?(?:#|\(|[aiLmsux-]*x[aiLmsux-]*[:)])")
@@ -268,7 +270,11 @@ def _has_alternation(group: _Group) -> bool:
 
 
 def _is_unbounded(quantifier: str) -> bool:
-    return _UNBOUNDED.fullmatch(quantifier) is not None
+    """`*`, `+`, `{n,}` and a large bounded range `{n,m}` with m above `LARGE_REPEAT`."""
+    if _UNBOUNDED.fullmatch(quantifier):
+        return True
+    large = _BOUNDED_RANGE.fullmatch(quantifier)
+    return large is not None and int(large.group(1)) > LARGE_REPEAT
 
 
 def _run(group: _Group) -> Iterator[tuple[str, str] | list[_Group]]:
@@ -318,13 +324,14 @@ def _never_overlap(a: str, b: str) -> bool:
 @dataclass(frozen=True)
 class _Ends:
     """What a sequence shows its neighbours: the unbounded atoms reachable from its start
-    (`head`) and from its end (`tail`), whether it may match nothing, and whether it holds a
-    run of its own."""
+    (`head`) and from its end (`tail`), whether it may match nothing, whether it holds a
+    run of its own, and how many adjacent unbounded pairs in it never overlap (`apart`)."""
 
     head: tuple[str, ...]
     tail: tuple[str, ...]
     nullable: bool
     run: bool
+    apart: int = 0
 
 
 def _ends(group: _Group) -> _Ends:
@@ -332,6 +339,7 @@ def _ends(group: _Group) -> _Ends:
     head: list[str] = []
     reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
     empty_so_far = True  # everything so far may match nothing
+    apart = 0  # adjacent unbounded pairs that provably never overlap
     for element in _run(group):
         if isinstance(element, list):
             branches = [_ends(branch) for branch in element]
@@ -340,6 +348,7 @@ def _ends(group: _Group) -> _Ends:
             starts = [atom for b in branches for atom in b.head]
             if any(not _never_overlap(seen, atom) for seen in reachable for atom in starts):
                 return _Ends((), (), nullable=False, run=True)
+            apart += len(reachable) * len(starts) + sum(b.apart for b in branches)
             head += starts if empty_so_far else []
             nullable = any(b.nullable for b in branches)
             tails = [atom for b in branches for atom in b.tail]
@@ -353,12 +362,13 @@ def _ends(group: _Group) -> _Ends:
         if _is_unbounded(quantifier):
             if any(not _never_overlap(seen, atom) for seen in reachable):
                 return _Ends((), (), nullable=False, run=True)
+            apart += len(reachable)
             head += [atom] if empty_so_far else []
             reachable = [*reachable, atom] if nullable else [atom]
         elif not nullable:
             reachable = []
         empty_so_far = empty_so_far and nullable
-    return _Ends(tuple(head), tuple(reachable), nullable=empty_so_far, run=False)
+    return _Ends(tuple(head), tuple(reachable), nullable=empty_so_far, run=False, apart=apart)
 
 
 def _has_unbounded_in_a_row(group: _Group) -> bool:
@@ -399,7 +409,8 @@ def _blank(pattern: str) -> str:
 
 @dataclass(frozen=True)
 class CompiledPattern:
-    """A compiled scan pattern and the number of its unbounded quantifiers."""
+    """A compiled scan pattern and the number of its overlapping unbounded quantifiers: all
+    of them minus the adjacent pairs that provably never overlap (`\\d+\\s*zł` counts 1)."""
 
     pattern: re.Pattern[str]
     unbounded: int
@@ -434,6 +445,9 @@ def compile_pattern(pattern: str) -> CompiledPattern:
       `\\d` or `\\s` next to one plain character it cannot match, count as disjoint
       (`\\d+\\s*zł`, `\\d+-+`);
     - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
+    - everywhere above, a bounded range `{n,m}` with m above `LARGE_REPEAT` (lazy and
+      possessive forms included) counts as unbounded: `a{1,200}a{1,200}c` is a run, while
+      `a{2,3}b` and `.{0,20}cena` stay bounded;
     - anything `re` cannot compile is refused.
     Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
     and a quantified group with an alternation nested deeper (`((a|b)c)+`).
@@ -442,8 +456,8 @@ def compile_pattern(pattern: str) -> CompiledPattern:
     are refused while `(a|b)a*c` passes.
     Knowingly not caught: unbounded runs separated by a literal (`a+.a+.a+c`, `.*a.*a.*c`;
     the count of unbounded quantifiers caps them, and `regex` matches a pattern with two or
-    more of them on a shorter cut of the text, see `regex`), nested bounded repeats
-    of plain atoms without a group (`a{1,30}b?a{1,30}`), overlapping alternation at the top
+    more of them on a shorter cut of the text, see `regex`), nested small bounded repeats
+    of plain atoms without a group (`a{1,20}b?a{1,20}`), overlapping alternation at the top
     level, and lookarounds, whose content is checked like any group but not for what it
     looks at.
     """
@@ -462,17 +476,20 @@ def compile_pattern(pattern: str) -> CompiledPattern:
     unbounded = sum(_is_unbounded(q) for q in _quantifiers(tree))
     if _is_risky(tree) or unbounded > MAX_UNBOUNDED:
         raise PatternRefused(_FOREVER)
+    crossing = max(0, unbounded - _ends(tree).apart)  # `\d+\s*zł` counts once
     try:
-        return CompiledPattern(re.compile(stripped, re.IGNORECASE), unbounded)
+        return CompiledPattern(re.compile(stripped, re.IGNORECASE), crossing)
     except re.error as e:
         raise PatternRefused(f"Not a valid pattern: {e}") from e
 
 
 def regex(compiled: CompiledPattern, text: str) -> bool:
-    """Whether the pattern occurs in the original text, cut by its unbounded quantifiers:
-    0 or 1 → `MAX_TEXT_CHARS` (4096), 2 → `MAX_TEXT_CHARS_MULTI` (1024), 3 →
+    """Whether the pattern occurs in the original text, cut by its overlapping unbounded
+    quantifiers: 0 or 1 → `MAX_TEXT_CHARS` (4096), 2 → `MAX_TEXT_CHARS_MULTI` (1024), 3 →
     `MAX_TEXT_CHARS_TRIPLE` (256). Each extra literal-separated unbounded quantifier
-    multiplies the worst-case backtracking by the text length, so the cut shrinks with it."""
+    multiplies the worst-case backtracking by the text length, so the cut shrinks with it;
+    a pair that never overlaps (`\\d+\\s*`) cannot trade characters between its two atoms,
+    so it is counted once."""
     return compiled.pattern.search(text[: _CUTS[compiled.unbounded]]) is not None
 
 

@@ -162,11 +162,11 @@ last 3 000 messages of Garden Club back to 2026-06-01; the chat continues furthe
 
 - `fold` uses an explicit accent table, not NFD: й must stay й.
 - `regex` matches the original text (section 3 corrected).
-- There is no step budget: the guard is a heuristic plus a 1024-character cap for patterns with two or more unbounded quantifiers.
+- There is no step budget: the guard is a heuristic plus a text cap of 4096 / 1024 / 256 by the count of overlapping unbounded quantifiers; `{n,m}` with m > 20 counts as unbounded.
 - No fold cache.
 - A bad `sender` format is refused with "sender must be a user id or @username."
 - A numeric `sender` is used as is.
 - The soft time budget is 50 s, the hard ceiling 60 s.
 - The distance of "trackor" and "tractor" is 1 (the plan's example was wrong).
 - The scan ends on `next_before_id is None` or on a short page that was not stopped early.
-- Under `until` or `topic` the note carries a scope clause (" in topic 7 up to 2026-10-01") instead of claiming the whole chat.
+- Under `until` or `topic` the note carries a scope clause (" in topic 7 up to 2026-10-01 12:00", `until` in UTC as given) instead of claiming the whole chat.
