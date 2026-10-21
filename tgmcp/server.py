@@ -32,6 +32,7 @@ from tgmcp.models import (
     Message,
     Page,
     QueryTried,
+    ScanMode,
     ScanResult,
     SearchResult,
     StoppedBy,
@@ -45,7 +46,8 @@ from tgmcp.resolve import Ambiguous, Directory, NotFound
 
 TOOL_TIMEOUT_S = 30.0
 # scan_chat pages through a whole chat: its own ceiling, above the other tools'.
-SCAN_TIMEOUT_S = 60.0
+SCAN_TIMEOUT_S = 60.0  # hard: guarded() cancels the call
+SCAN_BUDGET_S = 50.0  # soft: the loop stops by itself, so the hits found so far are returned
 PAGE_SIZE = 100
 PAGE_PAUSE_S = 0.25  # between two pages, so a long scan does not provoke a flood wait
 clock = time.monotonic  # replaced in tests
@@ -84,8 +86,9 @@ def guarded[**P, R](
     def decorate(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         @functools.wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            limit_s = TOOL_TIMEOUT_S if timeout_s is None else timeout_s
             try:
-                async with asyncio.timeout(TOOL_TIMEOUT_S if timeout_s is None else timeout_s):
+                async with asyncio.timeout(limit_s):
                     return await func(*args, **kwargs)
             # Each error is already one sentence: not logged in (and why), flood wait, no match.
             except (Ambiguous, NotFound, GatewayError) as e:
@@ -95,9 +98,8 @@ def guarded[**P, R](
                     "search_messages": "a smaller limit, or drop expand=true",
                     "scan_chat": "a smaller max_messages",
                 }.get(tool_name, "a smaller limit")
-                seconds = 30 if timeout_s is None else f"{timeout_s:g}"
                 raise ToolError(
-                    f"{tool_name} took longer than {seconds} seconds; try {hint}."
+                    f"{tool_name} took longer than {limit_s:g} seconds; try {hint}."
                 ) from e
 
         return wrapper
@@ -254,16 +256,36 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
 
 
 async def _author_id(app: AppContext, sender: str) -> int:
-    """A numeric user id or @username of a user in the dialog list, as the search tools take it."""
-    if not re.fullmatch(r"@\w+|\d+", sender):
+    """A numeric user id (used as is: it only filters messages already read) or the @username
+    of a user in the dialog list, as the search tools take it."""
+    if re.fullmatch(r"\d+", sender):
+        return int(sender)
+    if not re.fullmatch(r"@\w+", sender):
         raise ToolError("sender must be a user id or @username.")
-    users = [c for c in await app.directory.chats() if c.kind == "user"]
-    for user in users:
-        if sender == str(user.id) or (
-            sender.startswith("@") and (user.username or "").lower() == sender[1:].lower()
-        ):
+    for user in await app.directory.chats():
+        if user.kind == "user" and (user.username or "").lower() == sender[1:].lower():
             return user.id
     raise ToolError(UNSEEN_USER)
+
+
+class _Budget:
+    """The scan's soft time budget: the clock starts when the tool is entered."""
+
+    def __init__(self) -> None:
+        self._started = clock()
+        self.pages = 0
+
+    def spent(self) -> float:
+        return clock() - self._started
+
+    def out(self) -> bool:
+        return self.spent() >= SCAN_BUDGET_S
+
+    def fits_next_page(self) -> bool:
+        """True when the time spent plus the mean time of a page so far stays in the budget."""
+        spent = self.spent()
+        mean = spent / self.pages if self.pages else 0.0
+        return spent + mean <= SCAN_BUDGET_S
 
 
 def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
@@ -276,6 +298,7 @@ def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
     wait: int,
 ) -> str:
     back = f"{oldest:%Y-%m-%d}" if oldest else "the newest message"
+    title = quoted(title)
     match stopped_by:
         case "start":
             return f"Scanned all {scanned} messages of {title}; the whole chat was covered."
@@ -290,7 +313,7 @@ def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
         case "time":
             return (
                 f"Scanned {scanned} messages of {title} back to {back} before the "
-                f"{SCAN_TIMEOUT_S:g}-second budget ran out; "
+                f"{SCAN_BUDGET_S:g}-second budget ran out; "
                 "call again with since/until to continue."
             )
         case "flood":
@@ -305,11 +328,11 @@ def _scan_note(  # noqa: PLR0913, PLR0917 - one sentence per stop reason
             )
 
 
-async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool signature
+async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915, C901 - mirrors the tool signature
     app: AppContext,
     chat: str,
     query: str,
-    mode: str,
+    mode: ScanMode,
     tolerance: int,
     topic: int | None,
     sender: str | None,
@@ -318,6 +341,9 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool sig
     max_messages: int,
     limit: int,
 ) -> ScanResult:
+    """Scan one chat. A non-Busy GatewayError after some pages stays an error on purpose: the
+    model retries with `since`/`until`, which is cheaper than guessing what was covered."""
+    budget = _Budget()
     _check_range(since, until)
     try:  # a refused pattern costs no request
         test = match.matcher(mode, query, tolerance)
@@ -325,8 +351,7 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool sig
         raise ToolError(str(e)) from e
     target = await _resolve(app, chat)
     _check_topic(target, topic)
-    sender_id = None if sender is None else await _author_id(app, sender)
-    started = clock()
+    author = None if sender is None else await _author_id(app, sender)
     hits: list[Message] = []
     scanned = 0
     oldest: datetime | None = None
@@ -335,10 +360,10 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool sig
     wait = 0
     stopped_by: StoppedBy | None = None
     while stopped_by is None:
-        if scanned:
-            if clock() - started >= SCAN_TIMEOUT_S:
-                stopped_by = "time"
-                break
+        if not budget.fits_next_page():
+            stopped_by = "time"
+            break
+        if budget.pages:
             await asyncio.sleep(PAGE_PAUSE_S)
         want = min(PAGE_SIZE, max_messages - scanned)
         try:
@@ -346,27 +371,30 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool sig
                 target.id, topic=topic, before_id=cursor, since=since, until=until, limit=want
             )
         except Busy as e:
-            if not scanned:
+            if not budget.pages:
                 raise
             stopped_by, wait = "flood", e.seconds
             break
-        for m in page.messages:
+        budget.pages += 1
+        cursor = page.next_before_id
+        ended = cursor is None or (len(page.messages) < want and not page.stopped_early)
+        for i, m in enumerate(page.messages):
             scanned += 1
             oldest, newest = m.date, newest or m.date
-            if test(m.text) and (sender_id is None or m.sender_id == sender_id):
+            if test(m.text) and (author is None or m.sender_id == author):
                 hits.append(m)
             if len(hits) >= limit:
                 stopped_by = "limit"
-            elif clock() - started >= SCAN_TIMEOUT_S:
+            elif budget.out():
                 stopped_by = "time"
             if stopped_by:
+                # The stopping message was the last one of the chat: the whole chat is covered.
+                if ended and i == len(page.messages) - 1:
+                    stopped_by = None
                 break
-        if stopped_by:
-            break
-        cursor = page.next_before_id
-        if cursor is None or (len(page.messages) < want and not page.stopped_early):
+        if stopped_by is None and ended:
             stopped_by = "since" if since is not None else "start"
-        elif scanned >= max_messages:
+        elif stopped_by is None and scanned >= max_messages:
             stopped_by = "max_messages"
     kept, cut = fit_budget([_capped(m) for m in hits])
     return ScanResult(
@@ -379,7 +407,7 @@ async def _scan(  # noqa: PLR0913, PLR0917, PLR0912, C901 - mirrors the tool sig
         newest_scanned=newest,
         reached_start=stopped_by == "start",
         stopped_by=stopped_by,
-        elapsed_s=round(clock() - started, 2),
+        elapsed_s=round(budget.spent(), 2),
         hits=kept,
         truncated=cut or stopped_by == "limit",
         note=_scan_note(stopped_by, target.title, scanned, oldest, since, limit, wait),

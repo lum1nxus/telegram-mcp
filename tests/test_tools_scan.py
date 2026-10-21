@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001 - Russian seed text has one-letter Cyrillic words
 import asyncio
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -82,7 +83,7 @@ async def test_fragment_finds_compound_that_search_misses(call: Call) -> None:
     assert data["reached_start"] is True
     assert data["stopped_by"] == "start"
     assert data["chat"]["title"] == "Garden Club"
-    assert data["note"] == "Scanned all 5 messages of Garden Club; the whole chat was covered."
+    assert data["note"] == "Scanned all 5 messages of 'Garden Club'; the whole chat was covered."
     assert data["newest_scanned"] > data["oldest_scanned"]
     assert data["elapsed_s"] >= 0
 
@@ -151,7 +152,7 @@ async def test_max_messages_stops_with_oldest_scanned(settings: Settings) -> Non
     assert _when(data["oldest_scanned"]) == _NOW - timedelta(hours=199)
     assert _when(data["newest_scanned"]) == _NOW
     assert data["note"] == (
-        "Scanned the last 200 messages of Plot back to "
+        "Scanned the last 200 messages of 'Plot' back to "
         f"{_NOW - timedelta(hours=199):%Y-%m-%d}; the chat continues further back."
     )
 
@@ -178,7 +179,7 @@ async def test_since_inside_the_chat(settings: Settings) -> None:
     assert data["stopped_by"] == "since"
     assert data["scanned"] == 5
     assert data["reached_start"] is False
-    assert data["note"] == f"Scanned 5 messages of Plot from {since:%Y-%m-%d} on."
+    assert data["note"] == f"Scanned 5 messages of 'Plot' from {since:%Y-%m-%d} on."
 
 
 async def test_limit_keeps_the_newest_hits(settings: Settings) -> None:
@@ -190,7 +191,7 @@ async def test_limit_keeps_the_newest_hits(settings: Settings) -> None:
     assert data["stopped_by"] == "limit"
     assert data["scanned"] == 2
     assert data["truncated"] is True
-    assert data["note"].startswith("Found the newest 2 hits within the last 2 messages of Plot")
+    assert data["note"].startswith("Found the newest 2 hits within the last 2 messages of 'Plot'")
 
 
 async def test_sender_by_username_and_by_id(settings: Settings) -> None:
@@ -202,9 +203,16 @@ async def test_sender_by_username_and_by_id(settings: Settings) -> None:
     assert [h["id"] for h in data["hits"]] == [5, 3, 1]
 
 
-async def test_unknown_sender_is_error_before_any_history_call(settings: Settings) -> None:
+async def test_numeric_sender_outside_the_dialogs_filters_as_is(settings: Settings) -> None:
+    gateway = _chat_with(["greenhouse"] * 4)
+    gateway.messages[PLOT][1] = gateway.messages[PLOT][1].model_copy(update={"sender_id": 777})
+    data = _data(await _scan(gateway, settings, query="greenhouse", sender="777"))
+    assert [h["id"] for h in data["hits"]] == [2]
+
+
+async def test_unknown_username_is_error_before_any_history_call(settings: Settings) -> None:
     gateway = _chat_with(["greenhouse"])
-    for sender in ("@ghost", "999", "Dana"):
+    for sender in ("@ghost", "Dana"):
         result = await _scan(gateway, settings, query="greenhouse", sender=sender)
         assert result.is_error
         assert "sender" in _text(result).lower()
@@ -269,7 +277,7 @@ async def test_busy_on_second_page_returns_flood(
     assert data["scanned"] == 100
     assert [h["id"] for h in data["hits"]] == [450, 400]
     assert data["note"] == (
-        f"Scanned 100 messages of Plot back to {_NOW - timedelta(hours=99):%Y-%m-%d}; "
+        f"Scanned 100 messages of 'Plot' back to {_NOW - timedelta(hours=99):%Y-%m-%d}; "
         "Telegram asked to wait 42 seconds, so the scan stopped there."
     )
 
@@ -290,15 +298,15 @@ async def test_time_budget_after_the_first_page(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gateway = _big()
-    # call 1 is the start; the 100 messages of page 1 are calls 2..101
-    monkeypatch.setattr(server, "clock", _ticking(100))
+    # call 1 starts the budget, call 2 checks page 1; its 100 messages are calls 3..102
+    monkeypatch.setattr(server, "clock", _ticking(101))
     data = _data(await _scan(gateway, settings, query="zzz"))
     assert data["stopped_by"] == "time"
     assert data["scanned"] == 100
     assert gateway.calls.count("history") == 1
     assert data["note"] == (
-        f"Scanned 100 messages of Plot back to {_NOW - timedelta(hours=99):%Y-%m-%d} "
-        "before the 60-second budget ran out; call again with since/until to continue."
+        f"Scanned 100 messages of 'Plot' back to {_NOW - timedelta(hours=99):%Y-%m-%d} "
+        "before the 50-second budget ran out; call again with since/until to continue."
     )
 
 
@@ -306,7 +314,7 @@ async def test_time_budget_is_checked_after_every_message(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gateway = _big()
-    monkeypatch.setattr(server, "clock", _ticking(10))  # the 10th message's check reads 61
+    monkeypatch.setattr(server, "clock", _ticking(11))  # the 10th message's check reads 61
     data = _data(await _scan(gateway, settings, query="zzz"))
     assert data["scanned"] == 10
     assert data["stopped_by"] == "time"
@@ -353,3 +361,75 @@ async def test_guarded_takes_its_own_timeout() -> None:
 
 def _when(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+async def test_real_time_budget_returns_hits_instead_of_an_error(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway = _big(hit_every=50)
+    original = gateway.history
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.15)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "history", slow)
+    monkeypatch.setattr(server, "SCAN_BUDGET_S", 0.3)
+    monkeypatch.setattr(server, "SCAN_TIMEOUT_S", 2.0)
+    started = time.monotonic()
+    data = _data(await _scan(gateway, settings, query="трактор"))
+    assert time.monotonic() - started < 2
+    assert data["stopped_by"] == "time"
+    assert 0 < gateway.calls.count("history") < 5
+    assert data["hits"]
+    assert data["scanned"] == 100 * gateway.calls.count("history")
+
+
+async def test_pause_only_between_pages(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "PAGE_PAUSE_S", 0.0123)
+    pauses: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def spy(delay: float, *args: Any) -> None:
+        if delay == 0.0123:
+            pauses.append(delay)
+        await real_sleep(0, *args)
+
+    monkeypatch.setattr(asyncio, "sleep", spy)
+    gateway = _big(count=450)
+    _data(await _scan(gateway, settings, query="zzz", max_messages=500))
+    assert gateway.calls.count("history") == 5
+    assert len(pauses) == 4
+
+
+async def test_pause_also_between_pages_of_service_messages(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "PAGE_PAUSE_S", 0.0123)
+    pauses: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def spy(delay: float, *args: Any) -> None:
+        if delay == 0.0123:
+            pauses.append(delay)
+        await real_sleep(0, *args)
+
+    monkeypatch.setattr(asyncio, "sleep", spy)
+    gateway = _big(count=1000, hit_every=1)
+    gateway.service[PLOT] = set(range(201, 1001))  # the newest 800 are service messages
+    data = _data(await _scan(gateway, settings, query="трактор"))
+    pages = gateway.calls.count("history")
+    assert pages >= 3
+    assert len(pauses) == pages - 1
+    assert data["stopped_by"] == "limit"
+
+
+async def test_stopping_on_the_last_message_of_the_chat_reports_start(settings: Settings) -> None:
+    gateway = _chat_with(["greenhouse", "x", "y"])
+    data = _data(await _scan(gateway, settings, query="greenhouse", limit=1))
+    assert data["stopped_by"] == "start"
+    assert data["reached_start"] is True
+    assert data["truncated"] is False
+    assert [h["id"] for h in data["hits"]] == [1]

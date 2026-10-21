@@ -118,4 +118,8 @@ The result states how far the scan looked, so an empty answer is not read as "no
 | `truncated` | the hits were cut by the size budget, or `limit` stopped the scan |
 | `note` | one sentence restating the coverage, for the model to quote |
 
-A scan stops at `max_messages`, at the start of the chat or of `since`, once `limit` hits are found (the first hits are the newest, so the scan stops early), after 60 seconds (checked after every message; `stopped_by` is `time`), or when Telegram asks to wait after at least one page (`flood`, with Telegram's sentence in `note`). A flood wait on the first page is an error. Pages are spaced by a quarter of a second, so a long scan does not provoke one.
+A scan stops at `max_messages`, at the start of the chat or of `since`, once `limit` hits are found (the first hits are the newest, so the scan stops early), when the time budget runs out, or when Telegram asks to wait after at least one page (`flood`, with Telegram's sentence in `note`). A flood wait on the first page is an error; so is any other Telegram error after some pages, on purpose: call again with `since`/`until`.
+
+The time budget is 50 seconds, counted from the start of the call. It is checked before each page (a page is not started when the time spent plus the mean page time would pass 50 seconds) and after each message; then `stopped_by` is `time` and the hits found so far are returned. The hard ceiling of the call is 60 seconds; it only cuts a request that hangs, and then the call is an error. Pages are spaced by a quarter of a second, so a long scan does not provoke a flood wait.
+
+A chat of exactly `max_messages` messages reports `max_messages` and says the chat continues further back, though nothing is left. The chat title in `note` is quoted.

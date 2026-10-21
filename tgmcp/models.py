@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 Kind = Literal["user", "group", "channel"]
 MediaKind = Literal["photo", "document", "voice", "video", "sticker", "other"]
+ScanMode = Literal["fragment", "words", "regex"]
 StoppedBy = Literal["max_messages", "since", "start", "time", "flood", "limit"]
 
 TEXT_CAP = 2000
@@ -83,7 +84,7 @@ class ScanResult(BaseModel):
 
     chat: Chat
     query: str
-    mode: str
+    mode: ScanMode
     tolerance: int
     scanned: int  # messages matched: the chat's plain messages, not only the sender's
     oldest_scanned: datetime | None
