@@ -6,9 +6,9 @@ For anyone curious what may come next: ideas worth doing, each with its trade-of
 
 Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Step 1 is done; the recommended order for the rest is: model-made synonyms, then a deep scan of one chat in memory, then steps 3 and 4 if they are still needed. Step 2 is better skipped.
 
-### Step 1: query expansion, no index (done, 21.10.2026)
+### Step 1: query expansion, no index (done, 21.10.2026; opt-in per call)
 
-`search_messages` sends a short series of Telegram queries (stems, the other script, Polish without diacritics) and reports them in `queries_tried`; 6 queries at most in one chat, 4 across all chats. The compound step (common heads such as "мини" + "трактор") is implemented but off by default (`COMPOUNDS_ENABLED` in `tgmcp/expand.py`). How it works: [tools.md](tools.md#search).
+With `expand=true`, `search_messages` sends a short series of Telegram queries (stems, the other script, Polish without diacritics) and reports them in `queries_tried`; 6 queries at most in one chat, 4 across all chats. The compound step (common heads such as "мини" + "трактор") is implemented but off by default (`COMPOUNDS_ENABLED` in `tgmcp/expand.py`). How it works: [tools.md](tools.md#search).
 
 ### Next: synonyms made by the local model
 

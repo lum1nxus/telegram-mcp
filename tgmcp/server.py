@@ -81,7 +81,7 @@ def guarded[**P, R](
                 raise ToolError(str(e)) from e
             except TimeoutError as e:
                 hint = (
-                    "expand=false or a smaller limit"
+                    "a smaller limit, or drop expand=true"
                     if tool_name == "search_messages"
                     else "a smaller limit"
                 )
@@ -360,9 +360,10 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         description=describe(
             "Search messages by words, in one chat or in all chats. Telegram matches the "
             "beginnings of words. `sender` (a user id or @username) and `topic` need a chat; "
-            "`since` and `until` are dates. The server tries word stems, the other script "
-            "and Polish without diacritics before giving up; pass "
-            "expand=false for one exact search."
+            "`since` and `until` are dates. By default one exact Telegram search (word "
+            "beginnings only). Pass expand=true to also try the word stems, the other script "
+            "and Polish without diacritics (up to 6 searches in one chat, 4 across all chats) "
+            "and get queries_tried."
         ),
         annotations=ANNOTATIONS,
     )
@@ -376,7 +377,7 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         since: date | None = None,
         until: date | None = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 30,
-        expand: bool = True,
+        expand: bool = False,
     ) -> SearchResult:
         return await _search(_app(ctx), query, chat, topic, sender, since, until, limit, expand)
 

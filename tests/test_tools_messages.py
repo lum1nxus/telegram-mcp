@@ -348,8 +348,9 @@ async def test_context_drops_only_from_before_when_after_is_empty(settings: Sett
 # --- the search cascade -----------------------------------------------------------------------
 
 EXPAND_SENTENCE = (
-    "The server tries word stems, the other script and Polish without diacritics before "
-    "giving up; pass expand=false for one exact search."
+    "By default one exact Telegram search (word beginnings only). Pass expand=true to also try "
+    "the word stems, the other script and Polish without diacritics (up to 6 searches in one "
+    "chat, 4 across all chats) and get queries_tried."
 )
 
 
@@ -395,13 +396,13 @@ async def test_search_description_names_the_cascade(client: Client) -> None:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
     search = tools["search_messages"]
     assert EXPAND_SENTENCE in (search.description or "")
-    assert search.input_schema["properties"]["expand"]["default"] is True
+    assert search.input_schema["properties"]["expand"]["default"] is False
     assert list(search.input_schema["properties"])[-1] == "expand"
 
 
 async def test_expanded_search_finds_other_forms(settings: Settings) -> None:
     gateway = _one_chat("Tomek угостил фруктом соседей", "погода")
-    result = await _search(gateway, settings, query="фруктовая компания", chat="Plot")
+    result = await _search(gateway, settings, query="фруктовая компания", expand=True, chat="Plot")
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [1]
     assert _tried(data) == [("фрукт компан", 0), ("фрукт", 1)]
@@ -413,7 +414,7 @@ async def test_expanded_search_finds_other_forms(settings: Settings) -> None:
 async def test_compound_is_found_after_single_misses(settings: Settings, monkeypatch: Any) -> None:
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
-    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    result = await _search(gateway, settings, query="трактор", expand=True, chat="Plot")
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [1]
     tried = _tried(data)
@@ -424,7 +425,7 @@ async def test_compound_is_found_after_single_misses(settings: Settings, monkeyp
 
 async def test_a_one_word_miss_sends_no_compounds_by_default(settings: Settings) -> None:
     gateway = _one_chat("взяли автотрактор у Tomka")
-    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    result = await _search(gateway, settings, query="трактор", expand=True, chat="Plot")
     data = result.structured_content or {}
     assert data["hits"] == []
     assert _tried(data) == [("трактор", 0), ("traktor", 0)]  # exact + variants only
@@ -433,23 +434,25 @@ async def test_a_one_word_miss_sends_no_compounds_by_default(settings: Settings)
 
 async def test_other_script_variant(settings: Settings) -> None:
     gateway = _one_chat("traktor bez problemu")
-    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    result = await _search(gateway, settings, query="трактор", expand=True, chat="Plot")
     data = result.structured_content or {}
     assert [h["text"] for h in data["hits"]] == ["traktor bez problemu"]
     assert _tried(data) == [("трактор", 0), ("traktor", 1)]  # a hit before compounds stops it
 
 
 async def test_polish_without_diacritics(call: Call) -> None:
-    result = await call("search_messages", {"query": "odmowila", "chat": "Garden Club"})
+    result = await call(
+        "search_messages", {"query": "odmowila", "expand": True, "chat": "Garden Club"}
+    )
     data = result.structured_content or {}
     assert [h["text"] for h in data["hits"]] == ["Zielona firma odmówiła"]
     assert _tried(data) == [("odmowil", 1)]
 
 
-async def test_expand_false_is_one_exact_search(call: Call, seed: FakeGateway) -> None:
+async def test_default_is_one_exact_search(call: Call, seed: FakeGateway) -> None:
     result = await call(
         "search_messages",
-        {"query": "фруктовая компания", "chat": "Garden Club", "expand": False},
+        {"query": "фруктовая компания", "chat": "Garden Club"},
     )
     data = result.structured_content or {}
     assert data["hits"] == []
@@ -458,9 +461,21 @@ async def test_expand_false_is_one_exact_search(call: Call, seed: FakeGateway) -
     assert seed.calls.count("search_in_chat") == 1
 
 
+async def test_expand_true_runs_the_cascade(call: Call, seed: FakeGateway) -> None:
+    result = await call(
+        "search_messages",
+        {"query": "фруктовая компания", "chat": "Garden Club", "expand": True},
+    )
+    data = result.structured_content or {}
+    assert data["queries_tried"] != []
+    assert seed.calls.count("search_in_chat") > 1
+
+
 async def test_budget_and_dedup(call: Call, seed: FakeGateway, monkeypatch: Any) -> None:
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
-    result = await call("search_messages", {"query": "фруктовая компания", "chat": "-1001"})
+    result = await call(
+        "search_messages", {"query": "фруктовая компания", "expand": True, "chat": "-1001"}
+    )
     data = result.structured_content or {}
     queries = [q for q, _ in _tried(data)]
     assert len(queries) == 6
@@ -470,14 +485,16 @@ async def test_budget_and_dedup(call: Call, seed: FakeGateway, monkeypatch: Any)
     assert NOTHING_FOR_QUERIES == (
         "Nothing found for any of the {n} queries tried; see queries_tried."
     )
-    result = await call("search_messages", {"query": "погодная станция"})
+    result = await call("search_messages", {"query": "погодная станция", "expand": True})
     data = result.structured_content or {}
     assert len(_tried(data)) == 4
     assert seed.calls.count("search_global") == 4
 
 
 async def test_repeated_words_are_one_query(call: Call, seed: FakeGateway) -> None:
-    result = await call("search_messages", {"query": "granite granite", "chat": "-1001"})
+    result = await call(
+        "search_messages", {"query": "granite granite", "expand": True, "chat": "-1001"}
+    )
     data = result.structured_content or {}
     assert _tried(data) == [("granit", 1)]
     assert seed.calls.count("search_in_chat") == 1
@@ -485,7 +502,7 @@ async def test_repeated_words_are_one_query(call: Call, seed: FakeGateway) -> No
 
 async def test_hidden_hits_do_not_count(call: Call, monkeypatch: Any) -> None:
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
-    result = await call("search_messages", {"query": "secret"})
+    result = await call("search_messages", {"query": "secret", "expand": True})
     data = result.structured_content or {}
     assert data["hits"] == []
     tried = _tried(data)
@@ -493,7 +510,7 @@ async def test_hidden_hits_do_not_count(call: Call, monkeypatch: Any) -> None:
     assert len(tried) == 4  # so the cascade went on
     assert "Private" not in _text(result)
     assert "-1007" not in _text(result)
-    result = await call("search_messages", {"query": "granite"})
+    result = await call("search_messages", {"query": "granite", "expand": True})
     data = result.structured_content or {}
     assert _tried(data) == [("granit", 1)]  # the hidden hit is not counted
 
@@ -502,7 +519,9 @@ async def test_busy_before_any_hit_is_an_error_naming_the_queries(
     call: Call, seed: FakeGateway, monkeypatch: Any
 ) -> None:
     _busy_on(seed, monkeypatch, "search_in_chat", 2)
-    result = await call("search_messages", {"query": "фруктовая компания", "chat": "Garden Club"})
+    result = await call(
+        "search_messages", {"query": "фруктовая компания", "expand": True, "chat": "Garden Club"}
+    )
     assert result.is_error
     text = _text(result)
     assert "Telegram asks to wait 30 seconds" in text
@@ -513,7 +532,7 @@ async def test_busy_on_the_first_global_query(
     call: Call, seed: FakeGateway, monkeypatch: Any
 ) -> None:
     _busy_on(seed, monkeypatch, "search_global", 1)
-    result = await call("search_messages", {"query": "фрукт"})
+    result = await call("search_messages", {"query": "фрукт", "expand": True})
     assert result.is_error
     assert _text(result).endswith("tried: фрукт.")
 
@@ -524,7 +543,7 @@ async def test_busy_after_a_hit_returns_the_hits_so_far(
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
     _busy_on(gateway, monkeypatch, "search_in_chat", 4)  # the compound after "автотрактор"
-    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    result = await _search(gateway, settings, query="трактор", expand=True, chat="Plot")
     assert not result.is_error
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [1]
@@ -536,13 +555,17 @@ async def test_busy_after_a_hit_returns_the_hits_so_far(
 async def test_merge_dedups_and_limits(settings: Settings, monkeypatch: Any) -> None:
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     texts = ("автотрактор", "микротрактор", "автотрактор и микротрактор")
-    result = await _search(_one_chat(*texts), settings, query="трактор", chat="Plot", limit=5)
+    result = await _search(
+        _one_chat(*texts), settings, query="трактор", expand=True, chat="Plot", limit=5
+    )
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [3, 2, 1]  # each hit once, newest first
     assert ("автотрактор", 2) in _tried(data)
     assert ("микротрактор", 2) in _tried(data)
     assert data["truncated"] is False
-    result = await _search(_one_chat(*texts), settings, query="трактор", chat="Plot", limit=2)
+    result = await _search(
+        _one_chat(*texts), settings, query="трактор", expand=True, chat="Plot", limit=2
+    )
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [3, 2]
     assert data["truncated"] is True
@@ -550,7 +573,7 @@ async def test_merge_dedups_and_limits(settings: Settings, monkeypatch: Any) -> 
 
 async def test_a_full_page_in_one_step_is_truncated(settings: Settings) -> None:
     gateway = _one_chat("трактор раз", "трактор два")
-    result = await _search(gateway, settings, query="трактор", chat="Plot", limit=2)
+    result = await _search(gateway, settings, query="трактор", expand=True, chat="Plot", limit=2)
     data = result.structured_content or {}
     assert ([h["id"] for h in data["hits"]], data["truncated"]) == ([2, 1], True)
     assert _tried(data) == [("трактор", 2)]
@@ -560,7 +583,9 @@ async def test_steps_keep_the_filters(settings: Settings, monkeypatch: Any) -> N
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
     day = (_NOW - timedelta(days=3)).date().isoformat()
-    result = await _search(gateway, settings, query="трактор", chat="Plot", since=day, until=day)
+    result = await _search(
+        gateway, settings, query="трактор", expand=True, chat="Plot", since=day, until=day
+    )
     data = result.structured_content or {}
     assert data["hits"] == []
     assert len(_tried(data)) == 6
@@ -573,7 +598,9 @@ async def test_empty_query_in_a_chat_is_one_search(call: Call, seed: FakeGateway
 
 
 async def test_another_form_on_the_seed(call: Call) -> None:
-    result = await call("search_messages", {"query": "теплицы", "chat": "Garden Club"})
+    result = await call(
+        "search_messages", {"query": "теплицы", "expand": True, "chat": "Garden Club"}
+    )
     data = result.structured_content or {}
     assert [h["text"] for h in data["hits"]] == ["Tomek поделился теплицей с соседями"]
     assert _tried(data) == [("теплиц", 1)]  # the stem finds "теплицей"; nothing else is tried
@@ -581,7 +608,9 @@ async def test_another_form_on_the_seed(call: Call) -> None:
 
 async def test_compound_on_the_seed(call: Call, monkeypatch: Any) -> None:
     monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
-    result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
+    result = await call(
+        "search_messages", {"query": "трактор", "expand": True, "chat": "Garden Club"}
+    )
     data = result.structured_content or {}
     assert [h["text"] for h in data["hits"]] == ["взяли минитрактор у Tomka"]
     assert _tried(data) == [  # compounds keep going after the hit, within the budget
@@ -595,7 +624,9 @@ async def test_compound_on_the_seed(call: Call, monkeypatch: Any) -> None:
 
 
 async def test_one_query_tried_is_singular(call: Call) -> None:
-    result = await call("search_messages", {"query": "@nobody_here", "chat": "Garden Club"})
+    result = await call(
+        "search_messages", {"query": "@nobody_here", "expand": True, "chat": "Garden Club"}
+    )
     data = result.structured_content or {}
     assert _tried(data) == [("@nobody_here", 0)]
     assert data["note"] == SEARCH_NOTE + " " + NOTHING_FOR_ONE_QUERY
@@ -622,7 +653,14 @@ async def test_every_step_gets_the_same_filters(
     window = {"since": "2026-10-01", "until": "2026-10-21", "limit": 7}
     await call(
         "search_messages",
-        {"query": "погодная", "chat": "-1005", "topic": 1, "sender": "111", **window},
+        {
+            "query": "погодная",
+            "expand": True,
+            "chat": "-1005",
+            "topic": 1,
+            "sender": "111",
+            **window,
+        },
     )
     assert len(recorded) == 6
     expected = {
@@ -634,7 +672,7 @@ async def test_every_step_gets_the_same_filters(
     }
     assert all(kwargs == expected for kwargs in recorded)
     recorded.clear()
-    await call("search_messages", {"query": "погодная", **window})
+    await call("search_messages", {"query": "погодная", "expand": True, **window})
     assert len(recorded) == 4
     assert all(
         kwargs == {k: expected[k] for k in ("since", "until", "limit")} for kwargs in recorded
@@ -651,7 +689,7 @@ async def test_empty_query_with_a_known_sender_lists_their_messages(
     assert data["queries_tried"] == []
 
 
-async def test_search_timeout_suggests_expand_false(
+async def test_search_timeout_suggests_dropping_expand(
     call: Call, seed: FakeGateway, monkeypatch: Any
 ) -> None:
     monkeypatch.setattr(server, "TOOL_TIMEOUT_S", 0.01)
@@ -665,7 +703,7 @@ async def test_search_timeout_suggests_expand_false(
     result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
     assert result.is_error
     assert _text(result).endswith(
-        "search_messages took longer than 30 seconds; try expand=false or a smaller limit."
+        "search_messages took longer than 30 seconds; try a smaller limit, or drop expand=true."
     )
     monkeypatch.setattr(seed, "history", slow)
     result = await call("get_messages", {"chat": "Garden Club"})

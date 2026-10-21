@@ -33,7 +33,7 @@ Six tools, all read-only. Details, arguments and limits: [docs/tools.md](docs/to
 | `list_chats` | lists your chats, filtered by name or kind |
 | `get_chat` | details of one chat: members, linked discussion group |
 | `list_topics` | the topics of a forum group |
-| `search_messages` | searches messages in one chat or in all chats, also trying other word forms, and the other script |
+| `search_messages` | searches messages in one chat or in all chats, can also try other word forms and scripts when asked with expand=true |
 | `get_messages` | reads a chat's history, newest first, page by page |
 | `get_message_context` | one message with the messages around it |
 
