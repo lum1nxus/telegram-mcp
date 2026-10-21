@@ -167,6 +167,9 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         "(a|aa)+",
         "(a|a?)*",
         "(a|ab){2,}",
+        # refused although harmless (accepted cost of the heuristic)
+        "(a+)?",
+        "((a|b)c)+",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
@@ -191,7 +194,9 @@ def test_three_unbounded_quantifiers_are_allowed() -> None:
 
 def test_leading_any_is_stripped() -> None:
     assert compile_pattern(".*abc").pattern == "abc"
-    assert compile_pattern("^.+abc").pattern == "abc"
+    assert compile_pattern(".+abc").pattern == ".+abc"  # needs a character before abc
+    assert compile_pattern("^.*abc").pattern == "^.*abc"  # first line only: kept
+    assert compile_pattern("^.+abc").pattern == "^.+abc"
     assert compile_pattern(".*?abc").pattern == ".*?abc"  # a lazy prefix is left alone
     compiled = compile_pattern(".*теплиц.*цена")
     assert compiled.pattern == "теплиц.*цена"

@@ -38,7 +38,7 @@ _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
 _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
-_LEADING_ANY = re.compile(r"\^?\.[*+](?![*+?{])")
+_LEADING_ANY = re.compile(r"\.\*(?![*+?{])")
 
 _FOLD_TABLE = str.maketrans(
     {
@@ -262,10 +262,12 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
       refused (`cena|price` at the top level passes);
     - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included): `a*a*`, `.*.*`,
       `\\w+\\w*` are refused;
-    - one leading `.*`, `.+`, `^.*` or `^.+` is stripped (taken as "anything before" under
-      `search`): `.*abc` compiles as `abc`;
+    - one bare leading `.*` is stripped: under `search` it changes nothing, so `.*abc`
+      compiles as `abc`; `.+abc`, `^.*abc` and lazy `.*?abc` are kept as given and counted;
     - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
     - anything `re` cannot compile is refused.
+    Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
+    and a quantified group with an alternation nested deeper (`((a|b)c)+`).
     Knowingly not caught: nested bounded repeats of plain atoms without a group
     (`a{1,30}b?a{1,30}`), overlapping alternation at the top level, and lookarounds, whose
     content is checked like any group but not for what it looks at.
