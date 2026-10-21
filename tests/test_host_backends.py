@@ -258,7 +258,10 @@ def test_check_model_refuses_a_model_that_cannot_call_tools() -> None:
     show = {**LOCAL_SHOW, "capabilities": ["completion", "vision"]}
     with pytest.raises(BackendError) as raised:
         asyncio.run(_ollama(show).check_model())
-    assert str(raised.value) == "Model gemma4:12b cannot call tools; pick one from the README list."
+    assert (
+        str(raised.value)
+        == "Model gemma4:12b cannot call tools; pick one from docs/local-models.md."
+    )
     asyncio.run(_ollama({**LOCAL_SHOW, "capabilities": ["completion", "tools"]}).check_model())
 
 

@@ -1,6 +1,6 @@
 # Roadmap
 
-What is worth doing next, with the trade-off of each item. Nothing here is promised. The read-only rule is not on the list and will not be: see [CONTRIBUTING.md](../CONTRIBUTING.md).
+For anyone curious what may come next: ideas worth doing, each with its trade-off, none of them promised; the read-only rule is not up for change (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Local full-text index (SQLite FTS5)
 
@@ -8,7 +8,7 @@ Telegram's own search matches word beginnings only, so "market" does not find "s
 
 ## A local broker process
 
-Each Claude session starts its own `tgmcp serve` with its own connection on the same login key. That works from one IP address, but Telegram may reject several connections from one key in the future, or after a VPN switch. A small local broker process that owns the single connection and serves all sessions would remove the problem. The price is a long-running background process, a local channel to secure, and more moving parts for a non-programmer to debug. Only worth it if the duplicated-key error shows up in real use.
+Each client session starts its own `tgmcp serve` with its own connection on the same login key. That works from one IP address, but Telegram may reject several connections from one key in the future, or after a VPN switch. A small local broker process that owns the single connection and serves all sessions would remove the problem. The price is a long-running background process, a local channel to secure, and more moving parts for a non-programmer to debug. Only worth it if the duplicated-key error shows up in real use.
 
 ## Keychain and Secret Service for secrets
 
@@ -16,7 +16,7 @@ Today `secrets.bin` is encrypted with DPAPI on Windows and is a plain `0600` fil
 
 ## Media download behind an explicit flag
 
-Today a message with a photo or a file only says that one is there. Downloading could let Claude read a PDF or an image. The price: disk copies of private files, large transfers, and a bigger attack surface (file names, file contents as prompt injection). If added: off by default, a size cap, a temporary folder that is cleaned, never for hidden chats.
+Today a message with a photo or a file only says that one is there. Downloading could let the model read a PDF or an image. The price: disk copies of private files, large transfers, and a bigger attack surface (file names, file contents as prompt injection). If added: off by default, a size cap, a temporary folder that is cleaned, never for hidden chats.
 
 ## Folder (dialog filter) awareness
 
@@ -28,7 +28,7 @@ List Telegram's active sessions (name, platform, last active) so a user can see 
 
 ## Refill global search after dropping hidden chats
 
-A search across all chats asks Telegram for `limit` hits and then drops those from hidden chats, so a page can come back shorter than asked, with `truncated` set (which also tells, by count only, that hidden hits exist). Fetching one more chunk until the page is full would give Claude full pages. The price: more requests per search and a loop that must stop on its own.
+A search across all chats asks Telegram for `limit` hits and then drops those from hidden chats, so a page can come back shorter than asked, with `truncated` set (which also tells, by count only, that hidden hits exist). Fetching one more chunk until the page is full would give the model full pages. The price: more requests per search and a loop that must stop on its own.
 
 ## Checks that need a live account
 
@@ -68,4 +68,4 @@ The paging questions of the bench rely on the seed giving `next_before_id` 71 fo
 
 ## Translating the search note
 
-The note attached to every search result is English, and Claude explains it to the user in the user's language. A translated note (or a shorter, language-neutral one) could help models that answer poorly from English hints. The price: more strings to keep in sync with tests, and a way to choose the language. Low priority.
+The note attached to every search result is English, and the model explains it to the user in the user's language. A translated note (or a shorter, language-neutral one) could help models that answer poorly from English hints. The price: more strings to keep in sync with tests, and a way to choose the language. Low priority.

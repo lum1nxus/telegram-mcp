@@ -410,16 +410,14 @@ def _bench_command(args: argparse.Namespace) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tgmcp", description="Read-only Telegram MCP server for Claude Code."
-    )
+    parser = argparse.ArgumentParser(prog="tgmcp", description="Read-only Telegram MCP server.")
     commands = parser.add_subparsers(dest="command", required=True)
     login = commands.add_parser("login", help="log in to Telegram and save the session")
     login.add_argument(
         "--reset", action="store_true", help="forget the saved API id and hash and ask again"
     )
     commands.add_parser("whoami", help="show the account, chat counts and hidden chats")
-    commands.add_parser("serve", help="run the MCP server on stdio (started by Claude Code)")
+    commands.add_parser("serve", help="run the MCP server on stdio (started by your MCP client)")
     commands.add_parser("logout", help="end the login on Telegram and remove the secrets file")
     ask = commands.add_parser(
         "ask", help="answer one question with a local model (Ollama, LM Studio)"
