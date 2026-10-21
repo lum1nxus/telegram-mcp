@@ -3,7 +3,7 @@
 import pytest
 
 from tgmcp import config
-from tgmcp.gateway import factory
+from tgmcp.telegram import factory
 
 pytestmark = pytest.mark.live
 

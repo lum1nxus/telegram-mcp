@@ -6,16 +6,9 @@ from telethon import errors, utils
 from telethon.tl import types
 from telethon.tl.custom import Dialog
 
-from tgmcp.gateway import (
-    Busy,
-    GatewayError,
-    IdleGuard,
-    NotLoggedIn,
-    chat_from_dialog,
-    map_error,
-    message_from_telethon,
-    topic_from_forum_topic,
-)
+from tgmcp.gateway import Busy, GatewayError, IdleGuard, NotLoggedIn
+from tgmcp.telegram.errors import map_error
+from tgmcp.telegram.mappers import chat_from_dialog, message_from_telethon, topic_from_forum_topic
 
 WHEN = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 

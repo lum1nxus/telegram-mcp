@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The logger name of the Telegram library, kept here so logging setup needs no network code.
+LIBRARY_LOGGER = "telethon"
+
 
 class ConfigError(Exception):
     """The configuration is unusable; the message is one sentence for the user."""
