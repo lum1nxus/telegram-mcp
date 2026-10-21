@@ -1,6 +1,9 @@
 import asyncio
+import http.client
 import json
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
@@ -25,7 +28,8 @@ from tgmcp.host.backends import (
         ("http://localhost", "http://localhost"),
         ("HTTP://LocalHost:1234/", "http://localhost:1234"),
         ("http://[::1]:11434/", "http://[::1]:11434"),
-        ("http://127.0.0.1:1234/v1/", "http://127.0.0.1:1234/v1"),
+        ("http://127.0.0.1:1234/v1/", "http://127.0.0.1:1234"),
+        ("http://localhost:1/a/b?x=1#f", "http://localhost:1"),
     ],
 )
 def test_local_only_accepts(url: str, base: str) -> None:
@@ -302,3 +306,105 @@ def test_make_backend() -> None:
     assert (lm.name, lm.model) == ("lmstudio", "")
     with pytest.raises(RemoteRefused):
         make_backend("ollama", "m", "http://example.com", think=False)
+
+
+def test_ollama_name_without_tag_matches_latest() -> None:
+    backend = _ollama(LOCAL_SHOW, tags={"models": [{"name": "qwen3:latest"}]}, model="qwen3")
+    asyncio.run(backend.check_model())
+    assert backend.model == "qwen3:latest"
+
+
+def test_ollama_string_arguments_are_parsed_and_malformed_flagged() -> None:
+    opener = Opener(
+        {
+            "POST /api/chat": {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "a", "arguments": '{"x": 1}'}},
+                        {"function": {"name": "b", "arguments": "{oops"}},
+                    ],
+                }
+            }
+        }
+    )
+    turn = asyncio.run(OllamaBackend("m", opener=opener).chat([], TOOLS))
+    assert turn.tool_calls[0].arguments == {"x": 1}
+    assert turn.tool_calls[1].arguments == {"_malformed": "{oops"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"message": "text"},
+        {"message": {"tool_calls": "x"}},
+        {"message": {"tool_calls": ["x"]}},
+        {"message": {"tool_calls": [{"function": 3}]}},
+    ],
+)
+def test_ollama_unreadable_answers(answer: dict[str, Any]) -> None:
+    opener = Opener({"POST /api/chat": answer})
+    with pytest.raises(BackendError, match="Ollama returned an answer tgmcp cannot read"):
+        asyncio.run(OllamaBackend("m", opener=opener).chat([], []))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"choices": [{"message": "x"}]}, {"choices": [{"message": {"tool_calls": [1]}}]}],
+)
+def test_openai_unreadable_answers(answer: dict[str, Any]) -> None:
+    opener = Opener({"POST /v1/chat/completions": answer})
+    with pytest.raises(BackendError, match="LM Studio returned an answer tgmcp cannot read"):
+        asyncio.run(OpenAICompatBackend("m", opener=opener).chat([], []))
+
+
+def test_incomplete_read_is_a_transport_error() -> None:
+    opener = Opener({"POST /api/chat": http.client.IncompleteRead(b"")})
+    with pytest.raises(BackendError, match="Ollama is not running at"):
+        asyncio.run(OllamaBackend("m", opener=opener).chat([], []))
+
+
+def test_leading_think_block_is_stripped_in_both_dialects() -> None:
+    think = "<think>\nhmm\n</think>\nAnswer"
+    o = Opener({"POST /api/chat": {"message": {"content": think}}})
+    assert asyncio.run(OllamaBackend("m", opener=o).chat([], [])).text == "Answer"
+    c = Opener({"POST /v1/chat/completions": _completion({"content": "<think>x</think> Hi <b>"})})
+    assert asyncio.run(OpenAICompatBackend("m", opener=c).chat([], [])).text == "Hi <b>"
+
+
+def test_404_on_listing_means_not_running_but_on_chat_means_missing_model() -> None:
+    tags = Opener({"GET /api/tags": http_error(404)})
+    with pytest.raises(BackendError, match="Ollama is not running at"):
+        asyncio.run(OllamaBackend("m", opener=tags).check_model())
+    models = Opener({"GET /v1/models": http_error(404)})
+    with pytest.raises(BackendError, match="LM Studio is not running at"):
+        asyncio.run(OpenAICompatBackend("m", opener=models).check_model())
+    chat = Opener({"POST /v1/chat/completions": http_error(404)})
+    with pytest.raises(BackendError, match="is not loaded in LM Studio"):
+        asyncio.run(OpenAICompatBackend("m", opener=chat).chat([], []))
+
+
+def test_default_opener_ignores_proxies_and_does_not_follow_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "http://example.invalid/")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")
+    try:
+        backend = OllamaBackend("m", f"http://127.0.0.1:{server.server_address[1]}")
+        with pytest.raises(BackendError, match="HTTP 302"):
+            asyncio.run(backend.check_model())
+    finally:
+        server.shutdown()
+        server.server_close()

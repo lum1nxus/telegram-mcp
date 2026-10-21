@@ -5,7 +5,9 @@ every backend calls it in `__init__`, and there is no override.
 """
 
 import asyncio
+import http.client
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +20,9 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 OLLAMA_URL = "http://127.0.0.1:11434"
 LMSTUDIO_URL = "http://127.0.0.1:1234"
 DEFAULT_NUM_CTX = 16384
+NOT_FOUND = 404
+_MODEL_PATHS = frozenset({"/api/chat", "/api/show", "/v1/chat/completions"})
+_THINK_SPAN = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 
 Opener = Callable[[urllib.request.Request, float], Any]
 
@@ -56,7 +61,7 @@ class ChatBackend(Protocol):
 
 
 def local_only(url: str) -> str:
-    """The base URL without a trailing slash, or `RemoteRefused` unless it is this computer."""
+    """Scheme, host and port only (path, query and fragment dropped), or `RemoteRefused`."""
     try:
         parts = urllib.parse.urlsplit(url.strip())
         host = parts.hostname
@@ -71,7 +76,7 @@ def local_only(url: str) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if parts.port is not None:
         netloc += f":{parts.port}"
-    return f"http://{netloc}{parts.path.rstrip('/')}"
+    return f"http://{netloc}"
 
 
 class _Body:
@@ -134,10 +139,18 @@ class _Base:
         try:
             return await asyncio.to_thread(_http_json, self._opener, method, self.url + path, body)
         except urllib.error.HTTPError as exc:
-            if exc.code == 404 and self.model:  # noqa: PLR2004
+            if exc.code == NOT_FOUND and path in _MODEL_PATHS and self.model:
                 raise BackendError(self._missing(self.model)) from exc
+            if exc.code == NOT_FOUND:
+                raise BackendError(self.unreachable.format(url=self.url)) from exc
             raise BackendError(f"{self.name} answered HTTP {exc.code} for {path}.") from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            http.client.HTTPException,
+        ) as exc:
             raise BackendError(self.unreachable.format(url=self.url)) from exc
 
 
@@ -176,15 +189,9 @@ class OllamaBackend(_Base):
         )
         message = raw.get("message")
         if not isinstance(message, dict):
-            raise BackendError("Ollama sent a reply without a message.")
-        calls: list[ToolCall] = []
-        for index, item in enumerate(message.get("tool_calls") or []):
-            function = item.get("function") or {}
-            arguments = function.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = {"_malformed": json.dumps(arguments, ensure_ascii=False)}
-            calls.append(ToolCall(f"call_{index}", str(function.get("name", "")), arguments))
-        return ModelTurn(str(message.get("content") or ""), tuple(calls), raw)
+            raise BackendError(_UNREADABLE.format(name="Ollama"))
+        calls = _tool_calls(message.get("tool_calls"), "Ollama", ids=False)
+        return ModelTurn(_text(message), calls, raw)
 
     async def check_model(self) -> None:
         if self.model.endswith("-cloud"):
@@ -202,7 +209,9 @@ class OllamaBackend(_Base):
         if self.model.endswith("-cloud"):
             raise RemoteRefused(_cloud(self.model))
         if self.model not in names:
-            raise BackendError(self._missing(self.model))
+            if f"{self.model}:latest" not in names:
+                raise BackendError(self._missing(self.model))
+            self.model = f"{self.model}:latest"
         details = (await self._http("POST", "/api/show", {"model": self.model})).get("details")
         if not isinstance(details, dict) or not (
             _filled(details.get("parameter_size")) and _filled(details.get("quantization_level"))
@@ -229,18 +238,11 @@ class OpenAICompatBackend(_Base):
         try:
             message = raw["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise BackendError("LM Studio sent a reply without a message.") from exc
-        calls: list[ToolCall] = []
-        for index, item in enumerate(message.get("tool_calls") or []):
-            function = item.get("function") or {}
-            calls.append(
-                ToolCall(
-                    str(item.get("id") or f"call_{index}"),
-                    str(function.get("name", "")),
-                    _parse_arguments(function.get("arguments")),
-                )
-            )
-        return ModelTurn(str(message.get("content") or ""), tuple(calls), raw)
+            raise BackendError(_UNREADABLE.format(name="LM Studio")) from exc
+        if not isinstance(message, dict):
+            raise BackendError(_UNREADABLE.format(name="LM Studio"))
+        calls = _tool_calls(message.get("tool_calls"), "LM Studio", ids=True)
+        return ModelTurn(_text(message), calls, raw)
 
     async def check_model(self) -> None:
         listed = await self._http("GET", "/v1/models")
@@ -255,6 +257,33 @@ class OpenAICompatBackend(_Base):
             self.model = ids[0]
         if self.model not in ids:
             raise BackendError(self._missing(self.model))
+
+
+_UNREADABLE = "{name} returned an answer tgmcp cannot read."
+
+
+def _text(message: dict[str, Any]) -> str:
+    """The plain content: reasoning fields are never read, a leading <think> span is cut."""
+    return _THINK_SPAN.sub("", str(message.get("content") or ""), count=1)
+
+
+def _tool_calls(items: Any, name: str, *, ids: bool) -> tuple[ToolCall, ...]:
+    if items is None:
+        return ()
+    if not isinstance(items, list):
+        raise BackendError(_UNREADABLE.format(name=name))
+    calls: list[ToolCall] = []
+    for index, item in enumerate(items):
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict):
+            raise BackendError(_UNREADABLE.format(name=name))
+        call_id = str(item.get("id") or f"call_{index}") if ids else f"call_{index}"
+        calls.append(
+            ToolCall(
+                call_id, str(function.get("name", "")), _parse_arguments(function.get("arguments"))
+            )
+        )
+    return tuple(calls)
 
 
 def _filled(value: Any) -> bool:
