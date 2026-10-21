@@ -40,3 +40,22 @@ async def test_raise_next_fires_once(seed):
     with pytest.raises(GatewayError):
         await seed.me()
     assert (await seed.me()).id == 100
+
+
+async def test_sender_username_maps_to_user_id(seed):
+    seed.messages[-1001][0] = seed.messages[-1001][0].model_copy(update={"sender_id": 111})
+    hits = await seed.search_in_chat(
+        -1001, "", topic=None, sender="@anna", since=None, until=None, limit=5
+    )
+    assert [m.id for m in hits] == [1]
+    with pytest.raises(GatewayError, match=r"No user @x in your chats."):
+        await seed.search_in_chat(
+            -1001, "", topic=None, sender="@x", since=None, until=None, limit=5
+        )
+
+
+async def test_empty_query_returns_everything_newest_first(seed):
+    hits = await seed.search_in_chat(
+        -1001, "", topic=None, sender=None, since=None, until=None, limit=3
+    )
+    assert [m.id for m in hits] == [120, 119, 118]

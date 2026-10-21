@@ -72,3 +72,30 @@ async def test_fresh_cache_is_not_refreshed_on_miss(seed):
     with pytest.raises(resolve.NotFound):
         await d.resolve("xyz")
     assert seed.calls.count("dialogs") == 1
+
+
+async def test_hidden_by_bare_username_and_by_title(seed):
+    d = resolve.Directory(seed, hidden=["autonews", "PRIVATE"])
+    ids = [c.id for c in await d.chats()]
+    assert -1003 not in ids
+    assert -1007 not in ids
+    with pytest.raises(resolve.NotFound):
+        await d.resolve("@autonews")
+
+
+async def test_chats_refreshes_by_age_and_returns_a_copy(seed):
+    clock = Clock()
+    d = resolve.Directory(seed, hidden=[], refresh_after_s=60.0, clock=clock)
+    first = await d.chats()
+    first.clear()
+    assert len(await d.chats()) == 8
+    assert seed.calls.count("dialogs") == 1
+    seed.chats.append(make_chat(-2000, title="Fresh Arrival"))
+    clock.now = 100.0
+    assert -2000 in [c.id for c in await d.chats()]
+    assert seed.calls.count("dialogs") == 2
+
+
+async def test_exact_title_beats_ambiguous_substring(seed):
+    d = resolve.Directory(seed, hidden=[])
+    assert (await d.resolve("auto news")).id == -1003

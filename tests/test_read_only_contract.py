@@ -26,13 +26,20 @@ def test_gateway_protocol_has_no_write_methods():
 
 
 def test_only_gateway_imports_telethon():
-    for path in PACKAGE.glob("*.py"):
+    for path in PACKAGE.rglob("*.py"):
         if path.name != "gateway.py":
             assert "telethon" not in path.read_text(encoding="utf-8")
 
 
 def test_no_write_names_anywhere_in_package():
-    for path in PACKAGE.glob("*.py"):
+    for path in PACKAGE.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 assert not any(w in node.name for w in FORBIDDEN), f"{path}:{node.name}"
+
+
+def test_gateway_calls_no_write_attributes():
+    tree = ast.parse((PACKAGE / "gateway.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            assert not any(w in node.attr for w in FORBIDDEN), f"line {node.lineno}: {node.attr}"

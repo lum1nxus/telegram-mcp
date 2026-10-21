@@ -36,9 +36,10 @@ class Directory:
         self._loaded_at = 0.0
 
     def is_hidden(self, chat: Chat) -> bool:
-        if str(chat.id) in self._hidden:
-            return True
-        return chat.username is not None and f"@{chat.username}".lower() in self._hidden
+        keys = {str(chat.id), chat.title.lower()}
+        if chat.username:
+            keys |= {chat.username.lower(), f"@{chat.username.lower()}"}
+        return not keys.isdisjoint(self._hidden)
 
     async def _load(self) -> list[Chat]:
         dialogs = await self._gateway.dialogs()
@@ -47,14 +48,15 @@ class Directory:
         return self._cache
 
     async def chats(self) -> list[Chat]:
-        if self._cache is None:
-            return await self._load()
-        return self._cache
+        if self._cache is None or self._clock() - self._loaded_at > self._refresh_after_s:
+            return list(await self._load())
+        return list(self._cache)
 
     async def resolve(self, ref: str) -> Chat:
         chats = await self.chats()
+        stale_at = self._loaded_at
         found = _match(ref, chats)
-        if found is None and self._clock() - self._loaded_at > self._refresh_after_s:
+        if found is None and self._clock() - stale_at > self._refresh_after_s:
             chats = await self._load()
             found = _match(ref, chats)
         if found is None:
