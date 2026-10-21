@@ -8,7 +8,7 @@ Telegram's own search matches the beginnings of words: "market" finds "marketing
 
 ### Step 1: query expansion, no index (done, 21.10.2026)
 
-`search_messages` sends a short series of Telegram queries (stems, the other script, Polish without diacritics, common compounds such as "мини" + "трактор") and reports them in `queries_tried`; 6 queries at most in one chat, 4 across all chats. How it works: [tools.md](tools.md#search).
+`search_messages` sends a short series of Telegram queries (stems, the other script, Polish without diacritics) and reports them in `queries_tried`; 6 queries at most in one chat, 4 across all chats. The compound step (common heads such as "мини" + "трактор") is implemented but off by default (`COMPOUNDS_ENABLED` in `tgmcp/expand.py`). How it works: [tools.md](tools.md#search).
 
 ### Next: synonyms made by the local model
 
@@ -20,7 +20,7 @@ For one named chat, the server reads its last few thousand messages into memory 
 
 ### Step 2: splitting compound words
 
-A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can split "минитрактор" into "мини" + "трактор" and recognise word forms a stemmer misses. On its own it buys little: Telegram still matches prefixes, and step 1 already tries common compound heads; the split only helps once there is a local index (step 3). The dictionaries weigh tens of megabytes. Skip unless step 3 lands.
+A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can split "минитрактор" into "мини" + "трактор" and recognise word forms a stemmer misses. On its own it buys little: Telegram still matches prefixes, and step 1 has a compound-head step (off by default); the split only helps once there is a local index (step 3). The dictionaries weigh tens of megabytes. Skip unless step 3 lands.
 
 ### Step 3: a local full-text index (SQLite FTS5)
 

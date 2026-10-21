@@ -43,7 +43,7 @@ Telegram's search matches the beginnings of words, not fragments, and every word
 2. with three or more words, the two rarest words (a number, an @name or a capitalised name counts as rarer than a common word, then a longer word);
 3. the rarest word alone;
 4. that word in the other script ("трактор" and "traktor"), for Polish without diacritics ("odmów" as "odmow") and, for Russian, with "ё" as "е" ("ёлк" as "елк"), one query each;
-5. common compounds of that word, most common first: "автотрактор", "микротрактор", "минитрактор", "autoplant". These are different words, so this step does not stop at the first hit: it tries as many as the budget allows and keeps every hit.
+5. common compounds (off by default; `COMPOUNDS_ENABLED` in `tgmcp/expand.py`): "автотрактор", "микротрактор", "минитрактор", "autoplant". These are different words, so this step does not stop at the first hit: it tries as many as the budget allows and keeps every hit.
 
 The budget is 6 Telegram queries for one chat and 4 for a search across all chats, which is heavier for Telegram. A query that repeats an earlier one is not sent. At most 8 words of a query are used, fewer if together they pass 200 characters.
 
@@ -53,7 +53,7 @@ Every result lists the queries in `queries_tried`, in order, each with its numbe
 
 Whether Telegram itself ignores Polish diacritics (and "ł") when it matches is an assumption not yet checked on a real account: the variant without diacritics only helps when the message is written without them.
 
-Every search result carries a note on how Telegram matches words, and the server tells the model to rephrase before concluding that nothing exists. Stems and compounds come from fixed word lists, not from a dictionary: a word in another form, a synonym or a word inside a longer word outside those lists can still be missed.
+Every search result carries a note on how Telegram matches words, and the server tells the model to rephrase before concluding that nothing exists. Stems and compound heads come from fixed word lists, not from a dictionary: a word in another form, a synonym or a word inside a longer word outside those lists can still be missed.
 
 A search across all chats needs a non-empty `query`. `sender` and `topic` need `chat`. Every query of the series uses the same `chat`, `topic`, `sender`, `since`, `until` and `limit`.
 

@@ -3,8 +3,9 @@
 Telegram matches the beginning of each word of a message and ANDs the words of a query, so a
 search for "фруктовая компания" misses "фруктом". This module turns a query into a short
 cascade of Telegram queries: word prefixes built from Snowball stems, the rarest pair and word,
-spelling variants (other script, Polish letters without diacritics, "ё" as "е") and common
-compounds. The server runs the cascade; see docs/history/2026-10-21-smart-search-v1-design.md.
+spelling variants (other script, Polish letters without diacritics, "ё" as "е") and, when
+COMPOUNDS_ENABLED is set (off by default), common compounds. The server runs the cascade;
+see docs/history/2026-10-21-smart-search-v1-design.md.
 """
 
 import re
@@ -49,6 +50,9 @@ COMPOUND_HEADS_LATIN: tuple[str, ...] = (
     "foto", "video", "tele", "multi",
 )  # fmt: skip
 MAX_COMPOUNDS = 20
+# off by default: the owner did not ask for it; set True to try common compound heads
+# after every other step missed
+COMPOUNDS_ENABLED = False
 MAX_VARIANTS = 3
 
 # Derivational tails cut from a prefix, longest first. The spec's single-letter tails (Russian
@@ -264,7 +268,8 @@ def _candidates(query: str, tokens: list[Token]) -> list[tuple[str, str]]:
     single = prefixes[rarest.position]
     steps.append(("single", single))
     steps += [("variant", v) for v in variants(single, rarest.script)]
-    steps += [("compound", c) for c in compounds(single, rarest.script)]
+    if COMPOUNDS_ENABLED:
+        steps += [("compound", c) for c in compounds(single, rarest.script)]
     return steps
 
 
