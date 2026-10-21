@@ -1,0 +1,129 @@
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from tgmcp import config, secrets
+
+HASH = "0123456789abcdef0123456789abcdef"
+SESSION = "1AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPp"
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows-only")
+
+
+@pytest.fixture(autouse=True)
+def _no_icacls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    restricted: list[Path] = []
+    monkeypatch.setattr(config, "restrict_to_owner", restricted.append)
+    return restricted
+
+
+@windows_only
+def test_protect_round_trip_hides_the_data():
+    data = b"the login key"
+    blob = secrets.protect(data)
+    assert data not in blob
+    assert secrets.unprotect(blob) == data
+    assert secrets.PLAIN is False
+
+
+@windows_only
+def test_garbage_is_a_secrets_error():
+    with pytest.raises(secrets.SecretsError, match="cannot be decrypted"):
+        secrets.unprotect(b"garbage")
+
+
+def test_repr_hides_the_values():
+    text = repr(secrets.Secrets(api_hash=HASH, session=SESSION))
+    assert HASH not in text
+    assert SESSION not in text
+
+
+def test_failed_write_leaves_no_temporary_file(tmp_path: Path, monkeypatch):
+    def broken(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", broken)
+    with pytest.raises(OSError):
+        secrets.write_secrets(tmp_path / "secrets.bin", HASH, SESSION)
+    assert list(tmp_path.iterdir()) == []
+
+
+@windows_only
+def test_tampered_blob_is_a_secrets_error():
+    blob = bytearray(secrets.protect(b"the login key"))
+    blob[-1] ^= 0xFF
+    with pytest.raises(secrets.SecretsError, match="tgmcp login"):
+        secrets.unprotect(bytes(blob))
+
+
+def test_write_secrets_round_trip_without_clear_text(tmp_path: Path, _no_icacls: list[Path]):
+    path = tmp_path / "secrets.bin"
+    secrets.write_secrets(path, HASH, SESSION)
+    raw = path.read_bytes()
+    if not secrets.PLAIN:
+        assert HASH.encode() not in raw
+        assert SESSION.encode() not in raw
+    assert secrets.read_secrets(path) == secrets.Secrets(api_hash=HASH, session=SESSION)
+    assert _no_icacls == [path.with_name("secrets.bin.tmp")]  # restricted before the rename
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["secrets.bin"]
+
+
+def test_failed_restriction_keeps_the_old_file(tmp_path: Path, monkeypatch):
+    path = tmp_path / "secrets.bin"
+    secrets.write_secrets(path, HASH, SESSION)
+    old = path.read_bytes()
+
+    def icacls_fails(target: Path) -> None:
+        raise subprocess.CalledProcessError(1, ["icacls", str(target)])
+
+    monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
+    with pytest.raises(subprocess.CalledProcessError):
+        secrets.write_secrets(path, "other-hash", "other-session")
+    assert path.read_bytes() == old
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["secrets.bin"]
+
+
+def test_read_missing_file_is_no_secrets(tmp_path: Path):
+    with pytest.raises(secrets.NoSecrets):
+        secrets.read_secrets(tmp_path / "secrets.bin")
+
+
+def test_plain_platform_stores_the_payload_as_is(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(secrets, "PLAIN", True)
+    path = tmp_path / "secrets.bin"
+    secrets.write_secrets(path, HASH, SESSION)
+    assert json.loads(path.read_bytes()) == {"v": 1, "api_hash": HASH, "session": SESSION}
+    assert secrets.read_secrets(path).session == SESSION
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not json",
+        b"\xff\xfe",
+        b"[1]",
+        json.dumps({"v": 2, "api_hash": HASH, "session": SESSION}).encode(),
+        json.dumps({"v": 1, "api_hash": HASH}).encode(),
+        json.dumps({"v": 1, "api_hash": 5, "session": SESSION}).encode(),
+    ],
+)
+def test_unreadable_payload_is_a_secrets_error(tmp_path: Path, monkeypatch, payload: bytes):
+    monkeypatch.setattr(secrets, "unprotect", lambda blob: payload)
+    path = tmp_path / "secrets.bin"
+    path.write_bytes(b"blob")
+    with pytest.raises(secrets.SecretsError, match="tgmcp login"):
+        secrets.read_secrets(path)
+
+
+def test_foreign_blob_is_a_secrets_error(tmp_path: Path, monkeypatch):
+    def refuse(blob: bytes) -> bytes:
+        raise secrets.SecretsError(secrets.FOREIGN)
+
+    monkeypatch.setattr(secrets, "unprotect", refuse)
+    path = tmp_path / "secrets.bin"
+    path.write_bytes(b"blob")
+    with pytest.raises(secrets.SecretsError, match="cannot be decrypted"):
+        secrets.read_secrets(path)
