@@ -13,3 +13,4 @@ Python package `tgmcp`. It exposes the owner's Telegram account to Claude Code t
 7. Session files (`*.session`) and credentials never go into git.
 
 Plans and specs live in `docs/`.
+Setup, commands and the tool list are in `README.md`.
