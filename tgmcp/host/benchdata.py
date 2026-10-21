@@ -299,7 +299,7 @@ def build_seed() -> FakeGateway:
         )
         for n, text in enumerate(_NEIGHBOURS, start=1)
     ]
-    # Words in other forms, scripts, compounds and without diacritics (the search bench).
+    # Words in other forms, scripts and without diacritics (the search bench).
     garden = [
         make_message(
             n,
@@ -379,6 +379,11 @@ _GARDEN_CHAT = _has("garden", "-1009")
 def _expanded(value: object) -> bool:
     """`expand` left out (None) or true: the server's search cascade ran."""
     return value is None or _is(True)(value)
+
+
+def _no_chat(value: object) -> bool:
+    """`chat` left out: the search runs across all chats."""
+    return value is None
 
 
 _HIDDEN_LEAKS = ["=Private", "granite secret"]
@@ -626,11 +631,13 @@ QUESTIONS: list[Question] = [
         _has("томек", "tomek"),
         [("теплицей", "соседями")],
     ),
-    _search_q(
+    # No `chat`: the global cascade. Checked against the fake: the ideal run finds -1009/5,
+    # and expand=False with "теплицы" finds nothing, so the stem step is still measured.
+    _q(
         "search-3",
-        "Кто брал трактор в Garden Club?",  # only the compound "минитрактор" is there
-        _has("трактор"),
-        [("минитрактор",)],
+        "Где упоминали теплицы?",
+        [("search_messages", {"query": _has("теплиц"), "chat": _no_chat, "expand": _expanded})],
+        [("теплицей", "соседями")],
     ),
     _search_q(
         "search-4",

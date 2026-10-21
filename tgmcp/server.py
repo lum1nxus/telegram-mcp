@@ -360,8 +360,8 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         description=describe(
             "Search messages by words, in one chat or in all chats. Telegram matches the "
             "beginnings of words. `sender` (a user id or @username) and `topic` need a chat; "
-            "`since` and `until` are dates. The server tries word stems, the other script, "
-            "Polish without diacritics and common compounds before giving up; pass "
+            "`since` and `until` are dates. The server tries word stems, the other script "
+            "and Polish without diacritics before giving up; pass "
             "expand=false for one exact search."
         ),
         annotations=ANNOTATIONS,

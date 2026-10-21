@@ -236,7 +236,8 @@ def test_rank_prefers_handles_then_capitalised_then_longer() -> None:
 # --- plan -------------------------------------------------------------------------------------
 
 
-def test_plan_one_word() -> None:
+def test_plan_one_word(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(expand, "COMPOUNDS_ENABLED", True)
     p = plan("фруктовая")
     assert p.steps[0] == ("exact", "фрукт")
     assert p.steps[1] == ("variant", "frukt")
@@ -250,7 +251,8 @@ def test_plan_one_word() -> None:
     assert len(set(_queries(p))) == len(p.steps)
 
 
-def test_plan_two_words() -> None:
+def test_plan_two_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(expand, "COMPOUNDS_ENABLED", True)
     p = plan("фруктовая компания")
     assert p.steps[:3] == (
         ("exact", "фрукт компан"),
@@ -260,6 +262,13 @@ def test_plan_two_words() -> None:
     assert "pair" not in _labels(p)
     assert _labels(p)[3:] == ["compound"] * 3
     assert len(p.steps) == MAX_QUERIES
+
+
+def test_plan_has_no_compounds_by_default() -> None:
+    assert expand.COMPOUNDS_ENABLED is False
+    p = plan("фруктовая")
+    assert p.steps == (("exact", "фрукт"), ("variant", "frukt"))
+    assert "compound" not in _labels(plan("фруктовая компания"))
 
 
 def test_plan_three_words_has_a_pair() -> None:
