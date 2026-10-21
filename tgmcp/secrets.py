@@ -108,6 +108,13 @@ if sys.platform == "win32":
         finally:
             _local_free(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
 
+else:
+
+    def _dpapi(data: bytes, *, encrypt: bool) -> bytes:
+        """Never called: `protect` and `unprotect` return early off Windows. It exists so the
+        module type-checks on every platform (CI runs on Linux)."""
+        raise RuntimeError("DPAPI is only available on Windows")
+
 
 def protect(data: bytes) -> bytes:
     """Encrypt for the current Windows user; the identity where `PLAIN`."""
