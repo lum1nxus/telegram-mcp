@@ -54,6 +54,7 @@ class Settings:
     hidden_chats: tuple[str, ...]
     expected_user: str | None
     home: Path
+    local_model: str | None = None  # the default model of `tgmcp ask`
 
     @property
     def secrets_path(self) -> Path:
@@ -106,12 +107,14 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     if hidden is not None and not hidden.strip():  # an empty variable counts as unset
         hidden = None
     expected = env.get("TGMCP_EXPECTED_USER") or data.get("expected_user")
+    local_model = env.get("TGMCP_LOCAL_MODEL") or data.get("local_model")
     return Settings(
         api_id=api_id_int,
         api_hash=env.get("TGMCP_API_HASH") or None,
         hidden_chats=_split_chats(hidden if hidden is not None else data.get("hidden_chats")),
         expected_user=str(expected) if expected else None,
         home=root,
+        local_model=str(local_model) if local_model else None,
     )
 
 
@@ -182,6 +185,8 @@ def save_credentials(api_id: int, home: Path) -> None:
         "hidden_chats": old.get("hidden_chats", []),
         "expected_user": old.get("expected_user"),
     }
+    if old.get("local_model"):
+        data["local_model"] = old["local_model"]
     _write_file(path, data)
 
 

@@ -562,4 +562,6 @@ QUESTIONS: list[Question] = [
     ),
 ]
 
+# The seed's hidden chat: `tgmcp bench` builds its server with these, never the user's config.
+BENCH_HIDDEN_CHATS = ("-1007",)
 SMOKE_IDS = ("lookup-1", "history-1", "paging-1", "hidden-1", "multilingual-1")

@@ -34,6 +34,26 @@ A search across all chats asks Telegram for `limit` hits and then drops those fr
 
 Three behaviours were reasoned from Telethon's code but not yet confirmed on a real account: reading the General topic of a forum (`getReplies` with message id 1; if Telegram refuses it, use the plain history filtered to topic 1), whether `list_topics` returns more than 100 topics when asked for 200 (if not, cap the tool at 100 or page through), and what Telegram answers to a per-chat search with an empty query and no sender (today it would surface as "Global search needs a query.", the wrong sentence for one chat). Each needs one call on a real account and, depending on the answer, a small fix.
 
+## Local models: follow-up questions (`tgmcp ask --follow-up`)
+
+`tgmcp ask` answers one question and forgets it. A `--follow-up` option could keep the last run's messages in a file and continue from them, so "and what did she say after that?" works. The price: a file that holds message text on disk (it would need the same protection as `secrets.bin` and a clear way to delete it), and a context that grows past what a small model can hold.
+
+## Local models: a model as the bench's judge
+
+`tgmcp bench` scores with fixed rules: the right tools, expected words in the answer, no invented ids or titles. A second model judging each answer could also catch wrong retellings and wrong dates. The price: the judge makes its own mistakes, results stop being repeatable, and a run takes twice as long. Rules stay the reference; a judge would be an extra column.
+
+## Local models: LM Studio without editing `mcp.json`
+
+LM Studio's API can attach an MCP server to a single request ("ephemeral MCP"), so `tgmcp ask --backend lmstudio` could let LM Studio run the tools itself, with no `mcp.json` edit. The price: LM Studio then talks to tgmcp outside tgmcp's own loop (no result cap, no step count, no bench comparability), and the API is young and may change.
+
+## Chat titles in global-search hits
+
+A search across all chats returns each hit with its chat id only, so a model must call `get_chat` to name the chat, and small models often skip that and write the id. Adding the chat title to each hit would save a step. The price: a few more bytes per hit within the same result budget, and care that a hidden chat's title can never appear.
+
+## A seed-facts test for `next_before_id`
+
+The paging questions of the bench rely on the seed giving `next_before_id` 71 for the first page of Hiking Club. A test that pins these seed facts (page sizes, cursors, the ids the questions name) would catch a seed change that silently breaks the bench's rules. Small and cheap; worth doing with the next change to the seed.
+
 ## Smaller clean-ups
 
 `tgmcp login` and the gateway each have their own fallback ladder over the secrets file and the old clear-text files; one `stored_credentials()` in `secrets.py` would replace both. The idle guard wakes every minute to check the clock; one sleep until the deadline would do. The idle-guard tests use real short sleeps; an injectable sleep would make them independent of the wall clock.

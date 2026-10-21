@@ -1,10 +1,15 @@
-"""The `tgmcp` command: login, whoami, serve, logout."""
+"""The `tgmcp` command: login, whoami, serve, logout, ask and bench."""
 
 import argparse
 import asyncio
 import getpass
+import json
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
 from tgmcp import logging_setup, secrets
 from tgmcp.config import (
@@ -20,6 +25,10 @@ from tgmcp.config import (
     save_credentials,
 )
 from tgmcp.gateway import MIGRATE, NO_TERMINAL, ApiKeyError, GatewayError, NotLoggedIn
+from tgmcp.host.backends import BackendError, ChatBackend, RemoteRefused, make_backend
+from tgmcp.host.benchdata import BENCH_HIDDEN_CHATS, QUESTIONS, SMOKE_IDS, Question, build_seed
+from tgmcp.host.loop import DEFAULT_MAX_STEPS, RunResult, Step, run_question
+from tgmcp.host.scorer import Score, score, table
 from tgmcp.resolve import Directory
 from tgmcp.server import build_server
 from tgmcp.telegram import end_session, factory, interactive_login
@@ -191,6 +200,149 @@ def _logout() -> int:
     return 0
 
 
+def _args_text(arguments: dict[str, Any]) -> str:
+    return ", ".join(
+        f"{key}={json.dumps(value, ensure_ascii=False)}" for key, value in arguments.items()
+    )
+
+
+def _call_line(step: Step, *, size: bool) -> str:
+    line = f"-> {step.call.name}({_args_text(step.call.arguments)})"
+    if size:
+        line += f" {len(step.result_text)} chars"
+        line += ", cut" if step.cut else ""
+        line += ", error" if step.is_error else ""
+    return line
+
+
+def _first_cause(exc: BaseException) -> BaseException:
+    """The first exception inside the task groups the MCP client wraps errors in."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
+
+
+async def _ask(
+    question: str, backend: ChatBackend, settings: Settings, max_steps: int
+) -> RunResult:
+    await backend.check_model()  # before Telegram: a missing model costs no connection
+    server = build_server(factory(settings), settings)
+    return await run_question(question, backend, server, max_steps=max_steps)
+
+
+def _ask_command(args: argparse.Namespace) -> int:
+    try:
+        settings = load_settings()
+        backend = make_backend(
+            args.backend, args.model or settings.local_model, args.url, think=args.think
+        )
+        run = asyncio.run(_ask(args.question, backend, settings, args.max_steps))
+    except Exception as raised:  # the MCP client wraps errors of the loop in task groups
+        exc = _first_cause(raised)
+        if not isinstance(exc, (ConfigError, RemoteRefused, BackendError, GatewayError)):
+            raise
+        _complain(str(exc))
+        return 2 if isinstance(exc, (NotLoggedIn, ConfigError)) else 1
+    if args.show_calls:
+        for step in run.steps:
+            _complain(_call_line(step, size=True))
+    if run.finished:
+        _say(run.answer or "")
+        return 0
+    _say(f"(unfinished after {len(run.steps)} steps)")
+    if run.answer:
+        _say(run.answer)
+    else:
+        for step in run.steps:
+            _say(_call_line(step, size=False))
+    return 1
+
+
+@dataclass
+class _BenchRun:
+    question: Question
+    number: int
+    score: Score
+    messages: list[dict[str, Any]]
+    error: str | None = None  # the exception type when the run raised
+    backend_failure: str | None = None  # the sentence of a `BackendError`
+
+    def as_json(self) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "id": self.question.id,
+            "category": self.question.category,
+            "run": self.number,
+            "score": asdict(self.score),
+            "messages": self.messages,
+        }
+        if self.error is not None:
+            row["error"] = self.error
+        return row
+
+
+def _bench_settings() -> Settings:
+    """The bench's own settings: no login, the seed's hidden chat, never the user's config."""
+    return Settings(
+        api_id=0, api_hash=None, hidden_chats=BENCH_HIDDEN_CHATS, expected_user=None, home=home()
+    )
+
+
+async def _bench_one(
+    question: Question, number: int, backend: ChatBackend, max_steps: int
+) -> _BenchRun:
+    seed = build_seed()
+    titles = {chat.title for chat in seed.chats}
+    ids = {chat.id for chat in seed.chats}
+    server = build_server(seed, _bench_settings())  # the fake gateway: never Telethon
+    started = time.perf_counter()
+    try:
+        run = await run_question(question.text, backend, server, max_steps=max_steps)
+    except Exception as raised:  # one broken run is scored zero; the bench goes on
+        exc = _first_cause(raised)
+        seconds = time.perf_counter() - started
+        zero = Score(False, False, False, False, steps=0, cuts=0, seconds=seconds)
+        failure = str(exc) if isinstance(exc, BackendError) else None
+        return _BenchRun(question, number, zero, [], type(exc).__name__, failure)
+    return _BenchRun(question, number, score(question, run, titles, ids), run.messages)
+
+
+async def _bench(
+    backend: ChatBackend, questions: list[Question], repeat: int, max_steps: int
+) -> list[_BenchRun]:
+    await backend.check_model()
+    return [
+        await _bench_one(question, number, backend, max_steps)
+        for question in questions
+        for number in range(1, repeat + 1)
+    ]
+
+
+def _bench_command(args: argparse.Namespace) -> int:
+    chosen = set(SMOKE_IDS) if args.set == "smoke" else None
+    questions = [q for q in QUESTIONS if chosen is None or q.id in chosen]
+    try:
+        backend = make_backend(args.backend, args.model, args.url, think=args.think)
+        runs = asyncio.run(_bench(backend, questions, args.repeat, DEFAULT_MAX_STEPS))
+    except (RemoteRefused, BackendError) as exc:
+        _complain(str(exc))
+        return 1
+    header = (
+        f"model={backend.model} backend={args.backend} "
+        f"think={'on' if args.think else 'off'} repeat={args.repeat}"
+    )
+    # Every run is a row: a percentage over N runs per question is the mean of its flags.
+    _say(table([(run.question, run.score) for run in runs], header))
+    if args.json is not None:
+        Path(args.json).write_text(
+            json.dumps([run.as_json() for run in runs], ensure_ascii=False, indent=1, default=str),
+            encoding="utf-8",
+        )
+    failures = list(dict.fromkeys(r.backend_failure for r in runs if r.backend_failure))
+    for sentence in failures:
+        _complain(sentence)
+    return 1 if failures else 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tgmcp", description="Read-only Telegram MCP server for Claude Code."
@@ -203,16 +355,52 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("whoami", help="show the account, chat counts and hidden chats")
     commands.add_parser("serve", help="run the MCP server on stdio (started by Claude Code)")
     commands.add_parser("logout", help="end the login on Telegram and remove the secrets file")
+    ask = commands.add_parser(
+        "ask", help="answer one question with a local model (Ollama, LM Studio)"
+    )
+    ask.add_argument("question", help="the question, in quotes")
+    _model_options(ask)
+    ask.add_argument(
+        "--max-steps", type=_positive, default=DEFAULT_MAX_STEPS, help="model calls at most (8)"
+    )
+    ask.add_argument(
+        "--show-calls", action="store_true", help="print each tool call and its size on stderr"
+    )
+    bench = commands.add_parser(
+        "bench", help="score a local model on the built-in questions (no Telegram data)"
+    )
+    _model_options(bench, model_required=True)
+    bench.add_argument("--set", choices=("default", "smoke"), default="default")
+    bench.add_argument("--repeat", type=_positive, default=1, help="runs per question (1)")
+    bench.add_argument("--json", help="write every run (messages and scores) to this file")
     return parser
+
+
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def _model_options(parser: argparse.ArgumentParser, *, model_required: bool = False) -> None:
+    parser.add_argument("--backend", choices=("ollama", "lmstudio"), default="ollama")
+    parser.add_argument(
+        "--model", required=model_required, help="the model name as the backend lists it"
+    )
+    parser.add_argument("--url", help="the backend's address on this computer")
+    parser.add_argument("--think", action="store_true", help="let the model think first")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    commands = {
+    commands: dict[str, Callable[[], int]] = {
         "login": lambda: _login(reset=args.reset),
         "whoami": _whoami_command,
         "serve": _serve,
         "logout": _logout,
+        "ask": lambda: _ask_command(args),
+        "bench": lambda: _bench_command(args),
     }
     try:
         return commands[args.command]()

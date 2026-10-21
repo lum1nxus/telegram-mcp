@@ -24,8 +24,11 @@ include = ["tgmcp*"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = ["live: talks to the real Telegram account, skipped without a session"]
-addopts = "-m 'not live'"
+markers = [
+    "live: talks to the real Telegram account, skipped without a session",
+    "local: runs a local model through Ollama, skipped unless it answers on 127.0.0.1:11434",
+]
+addopts = "-m 'not live and not local'"
 
 [tool.ruff]
 line-length = 100
