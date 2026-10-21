@@ -376,7 +376,10 @@ def test_question_rules_are_satisfiable_on_the_seed() -> None:
         assert not q.must_say_nothing_found
         ((name, preds),) = q.tool_sequence
         assert name == "search_messages"
-        assert preds["chat"]("Garden Club") and preds["chat"]("-1009")
+        if q.id == "search-3":  # the global search: no chat at all
+            assert preds["chat"](None) and not preds["chat"]("Garden Club")
+        else:
+            assert preds["chat"]("Garden Club") and preds["chat"]("-1009")
         assert all(preds["expand"](v) for v in (None, True, "true"))
         assert not any(preds["expand"](v) for v in (False, "false"))
         terms = [
@@ -533,8 +536,8 @@ IDEAL: dict[str, tuple[list[tuple[str, dict[str, Any]]], str]] = {
         "Tomek поделился теплицей с соседями (Garden Club, 21.10.2026).",
     ),
     "search-3": (
-        [("search_messages", {"query": "трактор", **GARDEN})],
-        "Dana написала в Garden Club: «взяли минитрактор у Tomka» (21.10.2026).",
+        [("search_messages", {"query": "теплицы"})],
+        "Tomek поделился теплицей с соседями (чат -1009, 21.10.2026).",
     ),
     "search-4": (
         [("search_messages", {"query": "odmowila", **GARDEN})],

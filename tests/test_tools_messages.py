@@ -348,8 +348,8 @@ async def test_context_drops_only_from_before_when_after_is_empty(settings: Sett
 # --- the search cascade -----------------------------------------------------------------------
 
 EXPAND_SENTENCE = (
-    "The server tries word stems, the other script, Polish without diacritics and common "
-    "compounds before giving up; pass expand=false for one exact search."
+    "The server tries word stems, the other script and Polish without diacritics before "
+    "giving up; pass expand=false for one exact search."
 )
 
 
@@ -410,7 +410,8 @@ async def test_expanded_search_finds_other_forms(settings: Settings) -> None:
     assert data["truncated"] is False
 
 
-async def test_compound_is_found_after_single_misses(settings: Settings) -> None:
+async def test_compound_is_found_after_single_misses(settings: Settings, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
     result = await _search(gateway, settings, query="трактор", chat="Plot")
     data = result.structured_content or {}
@@ -419,6 +420,15 @@ async def test_compound_is_found_after_single_misses(settings: Settings) -> None
     assert tried[:3] == [("трактор", 0), ("traktor", 0), ("автотрактор", 1)]
     assert len(tried) == 6  # compounds keep going within the budget
     assert gateway.calls.count("search_in_chat") == 6
+
+
+async def test_a_one_word_miss_sends_no_compounds_by_default(settings: Settings) -> None:
+    gateway = _one_chat("взяли автотрактор у Tomka")
+    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    data = result.structured_content or {}
+    assert data["hits"] == []
+    assert _tried(data) == [("трактор", 0), ("traktor", 0)]  # exact + variants only
+    assert gateway.calls.count("search_in_chat") == 2
 
 
 async def test_other_script_variant(settings: Settings) -> None:
@@ -448,7 +458,8 @@ async def test_expand_false_is_one_exact_search(call: Call, seed: FakeGateway) -
     assert seed.calls.count("search_in_chat") == 1
 
 
-async def test_budget_and_dedup(call: Call, seed: FakeGateway) -> None:
+async def test_budget_and_dedup(call: Call, seed: FakeGateway, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     result = await call("search_messages", {"query": "фруктовая компания", "chat": "-1001"})
     data = result.structured_content or {}
     queries = [q for q, _ in _tried(data)]
@@ -472,7 +483,8 @@ async def test_repeated_words_are_one_query(call: Call, seed: FakeGateway) -> No
     assert seed.calls.count("search_in_chat") == 1
 
 
-async def test_hidden_hits_do_not_count(call: Call) -> None:
+async def test_hidden_hits_do_not_count(call: Call, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     result = await call("search_messages", {"query": "secret"})
     data = result.structured_content or {}
     assert data["hits"] == []
@@ -509,6 +521,7 @@ async def test_busy_on_the_first_global_query(
 async def test_busy_after_a_hit_returns_the_hits_so_far(
     settings: Settings, monkeypatch: Any
 ) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
     _busy_on(gateway, monkeypatch, "search_in_chat", 4)  # the compound after "автотрактор"
     result = await _search(gateway, settings, query="трактор", chat="Plot")
@@ -520,7 +533,8 @@ async def test_busy_after_a_hit_returns_the_hits_so_far(
     assert data["note"] == SEARCH_NOTE + " " + str(Busy(30))
 
 
-async def test_merge_dedups_and_limits(settings: Settings) -> None:
+async def test_merge_dedups_and_limits(settings: Settings, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     texts = ("автотрактор", "микротрактор", "автотрактор и микротрактор")
     result = await _search(_one_chat(*texts), settings, query="трактор", chat="Plot", limit=5)
     data = result.structured_content or {}
@@ -542,7 +556,8 @@ async def test_a_full_page_in_one_step_is_truncated(settings: Settings) -> None:
     assert _tried(data) == [("трактор", 2)]
 
 
-async def test_steps_keep_the_filters(settings: Settings) -> None:
+async def test_steps_keep_the_filters(settings: Settings, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     gateway = _one_chat("взяли автотрактор у Tomka")
     day = (_NOW - timedelta(days=3)).date().isoformat()
     result = await _search(gateway, settings, query="трактор", chat="Plot", since=day, until=day)
@@ -564,7 +579,8 @@ async def test_another_form_on_the_seed(call: Call) -> None:
     assert _tried(data) == [("теплиц", 1)]  # the stem finds "теплицей"; nothing else is tried
 
 
-async def test_compound_on_the_seed(call: Call) -> None:
+async def test_compound_on_the_seed(call: Call, monkeypatch: Any) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
     data = result.structured_content or {}
     assert [h["text"] for h in data["hits"]] == ["взяли минитрактор у Tomka"]
@@ -589,6 +605,7 @@ async def test_one_query_tried_is_singular(call: Call) -> None:
 async def test_every_step_gets_the_same_filters(
     call: Call, seed: FakeGateway, monkeypatch: Any
 ) -> None:
+    monkeypatch.setattr("tgmcp.expand.COMPOUNDS_ENABLED", True)
     recorded: list[dict[str, Any]] = []
     in_chat, in_all = seed.search_in_chat, seed.search_global
 
