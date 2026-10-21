@@ -88,11 +88,11 @@ def cap_text(text: str, cap: int = TEXT_CAP) -> tuple[str, bool]:
     return text[:cap], True
 
 
-def fit_budget(
-    items: Sequence[BaseModel], budget: int = RESULT_BUDGET
-) -> tuple[list[BaseModel], bool]:
+def fit_budget[M: BaseModel](
+    items: Sequence[M], budget: int = RESULT_BUDGET
+) -> tuple[list[M], bool]:
     """Keep the longest prefix whose JSON size stays under `budget` (at least one item)."""
-    kept: list[BaseModel] = []
+    kept: list[M] = []
     total = 0
     for item in items:
         total += len(item.model_dump_json())

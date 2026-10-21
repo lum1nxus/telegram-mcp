@@ -5,6 +5,7 @@ import functools
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -15,7 +16,18 @@ from pydantic import Field
 
 from tgmcp.config import Settings
 from tgmcp.gateway import Busy, Gateway, GatewayError, NotLoggedIn
-from tgmcp.models import Chat, Kind, Topic
+from tgmcp.models import (
+    SEARCH_NOTE,
+    Chat,
+    Context,
+    Kind,
+    Message,
+    Page,
+    SearchResult,
+    Topic,
+    cap_text,
+    fit_budget,
+)
 from tgmcp.resolve import Ambiguous, Directory, NotFound
 
 TOOL_TIMEOUT_S = 30.0
@@ -70,8 +82,98 @@ def guarded[**P, R](
     return decorate
 
 
+def _capped(message: Message) -> Message:
+    text, cut = cap_text(message.text)
+    return message.model_copy(
+        update={"text": text, "text_truncated": message.text_truncated or cut}
+    )
+
+
 def _app(ctx: ToolContext[AppContext]) -> AppContext:
     return ctx.request_context.lifespan_context
+
+
+def _filter_chats(
+    chats: list[Chat], query: str | None, kind: Kind | None, include_archived: bool
+) -> list[Chat]:
+    needle = query.lower() if query else None
+    return [
+        c
+        for c in chats
+        if (include_archived or not c.archived)
+        and (kind is None or c.kind == kind)
+        and (needle is None or needle in c.title.lower() or needle in (c.username or "").lower())
+    ]
+
+
+async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
+    app: AppContext,
+    query: str,
+    chat: str | None,
+    topic: int | None,
+    sender: str | None,
+    since: date | None,
+    until: date | None,
+    limit: int,
+) -> SearchResult:
+    if chat is None and (sender is not None or topic is not None):
+        raise ToolError("sender and topic need a chat.")
+    if chat is None and not query.strip():
+        raise ToolError("Global search needs a query.")
+    if chat is None:
+        scope = "all chats"
+        found = await app.gateway.search_global(query, since=since, until=until, limit=limit)
+        visible = {c.id for c in await app.directory.chats()}
+        hits = [m for m in found if m.chat_id in visible]
+        full = len(found) == limit
+    else:
+        target = await app.directory.resolve(chat)
+        scope = target.title
+        hits = await app.gateway.search_in_chat(
+            target.id, query, topic=topic, sender=sender, since=since, until=until, limit=limit
+        )
+        full = len(hits) == limit
+    kept, cut = fit_budget([_capped(m) for m in hits])
+    return SearchResult(
+        query=query,
+        scope=scope,
+        since=since,
+        until=until,
+        hits=kept,
+        truncated=full or cut,
+        note=SEARCH_NOTE,
+    )
+
+
+async def _history(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
+    app: AppContext,
+    chat: str,
+    topic: int | None,
+    since: datetime | None,
+    until: datetime | None,
+    before_id: int | None,
+    limit: int,
+) -> Page:
+    target = await app.directory.resolve(chat)
+    found = await app.gateway.history(
+        target.id, topic=topic, before_id=before_id, since=since, until=until, limit=limit
+    )
+    kept, cut = fit_budget([_capped(m) for m in found])
+    more = len(found) == limit
+    return Page(
+        chat=target,
+        messages=kept,
+        truncated=cut,
+        next_before_id=kept[-1].id if (more or cut) and kept else None,
+    )
+
+
+async def _chat_details(app: AppContext, chat: str) -> Chat:
+    found = await app.directory.resolve(chat)
+    details = await app.gateway.chat_details(found.id)
+    if app.directory.is_hidden(details):
+        raise NotFound(chat, len(await app.directory.chats()))
+    return details
 
 
 def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Settings) -> MCPServer:
@@ -106,17 +208,7 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
     ) -> list[Chat]:
         chats = await _app(ctx).directory.chats()
-        needle = query.lower() if query else None
-        out = [
-            c
-            for c in chats
-            if (include_archived or not c.archived)
-            and (kind is None or c.kind == kind)
-            and (
-                needle is None or needle in c.title.lower() or needle in (c.username or "").lower()
-            )
-        ]
-        return out[:limit]
+        return _filter_chats(chats, query, kind, include_archived)[:limit]
 
     @mcp.tool(
         name="get_chat",
@@ -129,12 +221,7 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
     )
     @guarded("get_chat")
     async def get_chat(ctx: ToolContext[AppContext], chat: str) -> Chat:
-        app = _app(ctx)
-        found = await app.directory.resolve(chat)
-        details = await app.gateway.chat_details(found.id)
-        if app.directory.is_hidden(details):
-            raise NotFound(chat, len(await app.directory.chats()))
-        return details
+        return await _chat_details(_app(ctx), chat)
 
     @mcp.tool(
         name="list_topics",
@@ -153,5 +240,79 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
         if not found.is_forum:
             raise ToolError(f"{found.title} is not a forum group.")
         return await app.gateway.topics(found.id, limit)
+
+    @mcp.tool(
+        name="search_messages",
+        title="Search messages",
+        description=describe(
+            "Search messages by words, in one chat or in all chats. Telegram matches the "
+            "beginnings of words. `sender` (a user id or @username) and `topic` need a chat; "
+            "`since` and `until` are dates."
+        ),
+        annotations=ANNOTATIONS,
+    )
+    @guarded("search_messages")
+    async def search_messages(  # noqa: PLR0913, PLR0917 - signature fixed by the interface
+        ctx: ToolContext[AppContext],
+        query: str,
+        chat: str | None = None,
+        topic: int | None = None,
+        sender: str | None = None,
+        since: date | None = None,
+        until: date | None = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 30,
+    ) -> SearchResult:
+        return await _search(_app(ctx), query, chat, topic, sender, since, until, limit)
+
+    @mcp.tool(
+        name="get_messages",
+        title="Get messages",
+        description=describe(
+            "Read a chat's history, newest first. Page backwards with `before_id` taken from "
+            "`next_before_id`. `topic` selects a forum topic."
+        ),
+        annotations=ANNOTATIONS,
+    )
+    @guarded("get_messages")
+    async def get_messages(  # noqa: PLR0913, PLR0917 - signature fixed by the interface
+        ctx: ToolContext[AppContext],
+        chat: str,
+        topic: int | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        before_id: int | None = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+    ) -> Page:
+        return await _history(_app(ctx), chat, topic, since, until, before_id, limit)
+
+    @mcp.tool(
+        name="get_message_context",
+        title="Get message context",
+        description=describe(
+            "One message with the messages before and after it. With before=0 and after=0 "
+            "the message text is returned in full."
+        ),
+        annotations=ANNOTATIONS,
+    )
+    @guarded("get_message_context")
+    async def get_message_context(
+        ctx: ToolContext[AppContext],
+        chat: str,
+        message_id: int,
+        before: Annotated[int, Field(ge=0, le=30)] = 10,
+        after: Annotated[int, Field(ge=0, le=30)] = 10,
+    ) -> Context:
+        app = _app(ctx)
+        target = await app.directory.resolve(chat)
+        earlier, middle, later = await app.gateway.around(
+            target.id, message_id, before=before, after=after
+        )
+        full_text = before == 0 and after == 0
+        return Context(
+            chat=target,
+            target=middle if full_text else _capped(middle),
+            before=[_capped(m) for m in earlier],
+            after=[_capped(m) for m in later],
+        )
 
     return mcp
