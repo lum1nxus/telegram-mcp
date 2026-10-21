@@ -42,6 +42,10 @@ Three behaviours were reasoned from Telethon's code but not yet confirmed on a r
 
 `tgmcp bench` scores with fixed rules: the right tools, expected words in the answer, no invented ids or titles. A second model judging each answer could also catch wrong retellings and wrong dates. The price: the judge makes its own mistakes, results stop being repeatable, and a run takes twice as long. Rules stay the reference; a judge would be an extra column.
 
+## Local models: verify the LM Studio path live
+
+`tgmcp ask --backend lmstudio` and `tgmcp bench --backend lmstudio` are tested only against hand-written answers, and the LM Studio chat window with `mcp.json` only by reading LM Studio's documentation; the LM Studio path has not yet been verified live. One run of each on a real LM Studio would confirm the request shape, the tool-call format and the model list, and may need small fixes.
+
 ## Local models: LM Studio without editing `mcp.json`
 
 LM Studio's API can attach an MCP server to a single request ("ephemeral MCP"), so `tgmcp ask --backend lmstudio` could let LM Studio run the tools itself, with no `mcp.json` edit. The price: LM Studio then talks to tgmcp outside tgmcp's own loop (no result cap, no step count, no bench comparability), and the API is young and may change.

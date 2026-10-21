@@ -172,7 +172,7 @@ Claude is a cloud model: what a tool returns (your messages) goes to Anthropic a
 
 The price: a local model is much smaller than Claude, so its answers are simpler and it makes more mistakes (see "Limits" below). You need a graphics card with about 8 to 12 GB of memory, or patience: on the processor alone it works, but slowly.
 
-There are two ways. **LM Studio** is a program with a chat window, like the Claude app; it is the easiest. **Ollama with `tgmcp ask`** answers one question in a terminal; it is also how you measure which model works best (`tgmcp bench`). Both need `.venv/Scripts/tgmcp login` once before, as for Claude Code.
+There are two ways. **LM Studio** is a program with a chat window, like the Claude app; it is the easiest (the LM Studio path has not yet been verified live). **Ollama with `tgmcp ask`** answers one question in a terminal; it is also how you measure which model works best (`tgmcp bench`). Both need `.venv/Scripts/tgmcp login` once before, as for Claude Code.
 
 ### LM Studio (a chat window)
 
@@ -199,6 +199,7 @@ There are two ways. **LM Studio** is a program with a chat window, like the Clau
 3. In the repository folder, ask:
    - Git Bash or PowerShell: `.venv/Scripts/tgmcp ask "What did Nora say about the boots?"`
    - cmd.exe: `.venv\Scripts\tgmcp ask "What did Nora say about the boots?"`
+   - In Git Bash, a `!` inside double quotes is read as a history command; put such a question in single quotes there: `.venv/Scripts/tgmcp ask 'Who said "hi!" to Nora?'`
 
 Only the answer is printed. Useful options:
 
@@ -212,11 +213,12 @@ If the model does not finish, tgmcp prints `(unfinished after N steps)` and what
 
 ### What "local only" checks, and what it cannot see
 
-`tgmcp ask` and `tgmcp bench` refuse to talk to anything but this computer: the address must be `http://127.0.0.1`, `http://localhost` or `http://[::1]` (any port), system proxies are bypassed and a redirect to another address is refused. There is no option to turn this off. Ollama can also run "cloud" models that only look local (their names end in `-cloud`); tgmcp refuses those by name, and also when Ollama cannot tell the model's size and quantization, which a cloud model does not have. With `--backend lmstudio` the address check is the whole local-only rule: LM Studio's server does not say where a model runs, so tgmcp cannot check the model itself.
+`tgmcp ask` and `tgmcp bench` refuse to talk to anything but this computer: the address must be `http://127.0.0.1`, `http://localhost` or `http://[::1]` (any port), system proxies are bypassed and a redirect to another address is refused. There is no option to turn this off. Ollama can also run "cloud" models that only look local (their names end in `-cloud`); tgmcp refuses those by name, and also refuses models whose size and quantization Ollama cannot tell (which cloud-served models lack) or which carry a remote host or remote model. It also refuses a model that Ollama says cannot call tools. With `--backend lmstudio` the address check is the whole local-only rule: LM Studio's server does not say where a model runs, so tgmcp cannot check the model itself.
 
 What tgmcp cannot see:
 
 - Inside the **LM Studio window**, LM Studio is in charge, not tgmcp. Its own online features (searching and downloading models, updates, any cloud or remote feature it offers) are outside tgmcp's control. Check its settings yourself.
+- **Ollama** itself also has online features outside `tgmcp ask`'s control: the desktop app checks for updates, offers a sign-in to ollama.com and lists cloud models next to local ones. tgmcp refuses cloud models in its own runs, but what you do in the Ollama app is governed by the app's own settings.
 - Other software on your PC (a VPN, a program that reads your screen) is outside any tool's control.
 
 ### Which model works best: `tgmcp bench`

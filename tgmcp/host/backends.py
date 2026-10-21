@@ -24,6 +24,12 @@ NOT_FOUND = 404
 _MODEL_PATHS = frozenset({"/api/chat", "/api/show", "/v1/chat/completions"})
 _REASONING_KEYS = frozenset({"thinking", "reasoning", "reasoning_content"})
 _THINK_SPAN = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
+_REMOTE_KEYS = ("remote_host", "remote_model")  # Ollama's marks of a model served elsewhere
+_ERROR_TEXT_MAX = 300
+TIMED_OUT = (
+    f"The model did not answer within {REQUEST_TIMEOUT_S:.0f} s; "
+    "try a smaller model, --max-steps, or a shorter question."
+)
 
 Opener = Callable[[urllib.request.Request, float], Any]
 
@@ -34,6 +40,10 @@ class RemoteRefused(Exception):  # noqa: N818 - the name is part of the spec
 
 class BackendError(Exception):
     """One sentence for the user: unreachable, unknown model, bad JSON."""
+
+
+class BackendUnreachable(BackendError):  # noqa: N818 - a kind of BackendError
+    """The model server is not running at its address: `tgmcp bench` stops on it."""
 
 
 @dataclass(frozen=True)
@@ -126,8 +136,24 @@ def _http_json(
     return parsed
 
 
+def _error_text(exc: urllib.error.HTTPError) -> str:
+    """The `error` field of the local server's JSON reply, or nothing."""
+    try:
+        parsed = json.loads(exc.read() or b"null")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(error, dict):  # the OpenAI dialect: {"error": {"message": ...}}
+        error = error.get("message")
+    if not isinstance(error, str):
+        return ""
+    text = " ".join(error.split()).rstrip(".")
+    return text[:_ERROR_TEXT_MAX]
+
+
 class _Base:
     name = ""
+    label = ""  # the name in sentences for the user
     unreachable = ""
 
     def __init__(self, model: str, url: str, opener: Opener) -> None:
@@ -147,20 +173,23 @@ class _Base:
             if exc.code == NOT_FOUND and path in _MODEL_PATHS and self.model:
                 raise BackendError(self._missing(self.model)) from exc
             if exc.code == NOT_FOUND:
-                raise BackendError(self.unreachable.format(url=self.url)) from exc
-            raise BackendError(f"{self.name} answered HTTP {exc.code} for {path}.") from exc
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            ConnectionError,
-            OSError,
-            http.client.HTTPException,
-        ) as exc:
-            raise BackendError(self.unreachable.format(url=self.url)) from exc
+                raise BackendUnreachable(self.unreachable.format(url=self.url)) from exc
+            detail = _error_text(exc)
+            said = f": {detail}" if detail else ""
+            raise BackendError(f"{self.label} answered HTTP {exc.code} for {path}{said}.") from exc
+        except TimeoutError as exc:  # the server is there but the model is too slow
+            raise BackendError(TIMED_OUT) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise BackendError(TIMED_OUT) from exc
+            raise BackendUnreachable(self.unreachable.format(url=self.url)) from exc
+        except (ConnectionError, OSError, http.client.HTTPException) as exc:
+            raise BackendUnreachable(self.unreachable.format(url=self.url)) from exc
 
 
 class OllamaBackend(_Base):
     name = "ollama"
+    label = "Ollama"
     unreachable = "Ollama is not running at {url}; start it or pass --url."
 
     def __init__(
@@ -202,11 +231,8 @@ class OllamaBackend(_Base):
         if self.model.endswith("-cloud"):
             raise RemoteRefused(_cloud(self.model))
         tags = await self._http("GET", "/api/tags")
-        names = [
-            str(entry.get("name") or entry.get("model") or "")
-            for entry in tags.get("models") or []
-            if isinstance(entry, dict)
-        ]
+        entries = [entry for entry in tags.get("models") or [] if isinstance(entry, dict)]
+        names = [str(entry.get("name") or entry.get("model") or "") for entry in entries]
         if not self.model:
             if not names:
                 raise BackendError("No model is installed; run `ollama pull <model>`.")
@@ -217,22 +243,32 @@ class OllamaBackend(_Base):
             if f"{self.model}:latest" not in names:
                 raise BackendError(self._missing(self.model))
             self.model = f"{self.model}:latest"
-        details = (await self._http("POST", "/api/show", {"model": self.model})).get("details")
+        listed = entries[names.index(self.model)]
+        shown = await self._http("POST", "/api/show", {"model": self.model})
+        if _remote(listed) or _remote(shown):
+            raise RemoteRefused(_cloud(self.model))
+        details = shown.get("details")
         if not isinstance(details, dict) or not (
             _filled(details.get("parameter_size")) and _filled(details.get("quantization_level"))
         ):
             raise RemoteRefused(_cloud(self.model))
+        capabilities = shown.get("capabilities")
+        if isinstance(capabilities, list) and "tools" not in capabilities:
+            raise BackendError(
+                f"Model {self.model} cannot call tools; pick one from the README list."
+            )
 
 
 class OpenAICompatBackend(_Base):
     name = "lmstudio"
+    label = "LM Studio"
     unreachable = "LM Studio is not running at {url}; start its local server or pass --url."
 
     def __init__(self, model: str, url: str = LMSTUDIO_URL, *, opener: Opener = _urlopen) -> None:
         super().__init__(model, url, opener)
 
     def _missing(self, model: str) -> str:
-        return f"Model {model} is not loaded in LM Studio; load it there."
+        return f"Model {model} is not available in LM Studio (download or load it)."
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelTurn:
         raw = await self._http(
@@ -298,6 +334,11 @@ def _tool_calls(items: Any, name: str, *, ids: bool) -> tuple[ToolCall, ...]:
             )
         )
     return tuple(calls)
+
+
+def _remote(entry: dict[str, Any]) -> bool:
+    """Ollama names a remote host or model only for a model it does not run itself."""
+    return any(key in entry for key in _REMOTE_KEYS)
 
 
 def _filled(value: Any) -> bool:

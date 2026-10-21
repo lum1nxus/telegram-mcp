@@ -1,5 +1,6 @@
 import asyncio
 import http.client
+import io
 import json
 import threading
 import urllib.error
@@ -9,7 +10,9 @@ from typing import Any
 import pytest
 
 from tgmcp.host.backends import (
+    TIMED_OUT,
     BackendError,
+    BackendUnreachable,
     ModelTurn,
     OllamaBackend,
     OpenAICompatBackend,
@@ -89,8 +92,9 @@ class Opener:
         return Resp(answer)
 
 
-def http_error(code: int) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("http://x/", code, "err", None, None)  # type: ignore[arg-type]
+def http_error(code: int, body: Any = None) -> urllib.error.HTTPError:
+    fp = None if body is None else io.BytesIO(json.dumps(body).encode())
+    return urllib.error.HTTPError("http://x/", code, "err", None, fp)  # type: ignore[arg-type]
 
 
 TOOLS = [{"type": "function", "function": {"name": "chats", "parameters": {"type": "object"}}}]
@@ -207,10 +211,70 @@ def test_no_models_installed() -> None:
         asyncio.run(backend.check_model())
 
 
-def test_unreachable_is_backend_error() -> None:
+def test_unreachable_is_backend_unreachable() -> None:
     opener = Opener({"POST /api/chat": urllib.error.URLError("refused")})
-    with pytest.raises(BackendError, match=r"Ollama is not running at http://127.0.0.1:11434"):
+    with pytest.raises(
+        BackendUnreachable, match=r"Ollama is not running at http://127.0.0.1:11434"
+    ):
         asyncio.run(OllamaBackend("m", opener=opener).chat([], []))
+    assert issubclass(BackendUnreachable, BackendError)
+
+
+@pytest.mark.parametrize("answer", [TimeoutError(), urllib.error.URLError(TimeoutError())])
+def test_a_timeout_has_its_own_sentence_and_is_not_unreachable(answer: Exception) -> None:
+    opener = Opener({"POST /api/chat": answer})
+    with pytest.raises(BackendError) as raised:
+        asyncio.run(OllamaBackend("m", opener=opener).chat([], []))
+    assert str(raised.value) == (
+        "The model did not answer within 120 s; "
+        "try a smaller model, --max-steps, or a shorter question."
+    )
+    assert str(raised.value) == TIMED_OUT
+    assert not isinstance(raised.value, BackendUnreachable)
+
+
+def test_http_error_sentences_carry_the_servers_error_text() -> None:
+    error = {"error": "registry.ollama.ai/library/gemma2:9b does not support tools"}
+    ollama = Opener({"POST /api/chat": http_error(400, error)})
+    with pytest.raises(BackendError) as raised:
+        asyncio.run(OllamaBackend("m", opener=ollama).chat([], []))
+    assert str(raised.value) == (
+        "Ollama answered HTTP 400 for /api/chat: "
+        "registry.ollama.ai/library/gemma2:9b does not support tools."
+    )
+    lmstudio = Opener(
+        {"POST /v1/chat/completions": http_error(400, {"error": {"message": "Bad input."}})}
+    )
+    with pytest.raises(BackendError) as raised:
+        asyncio.run(OpenAICompatBackend("m", opener=lmstudio).chat([], []))
+    assert str(raised.value) == "LM Studio answered HTTP 400 for /v1/chat/completions: Bad input."
+    bare = Opener({"POST /api/chat": http_error(500)})
+    with pytest.raises(BackendError) as raised:
+        asyncio.run(OllamaBackend("m", opener=bare).chat([], []))
+    assert str(raised.value) == "Ollama answered HTTP 500 for /api/chat."
+
+
+def test_check_model_refuses_a_model_that_cannot_call_tools() -> None:
+    show = {**LOCAL_SHOW, "capabilities": ["completion", "vision"]}
+    with pytest.raises(BackendError) as raised:
+        asyncio.run(_ollama(show).check_model())
+    assert str(raised.value) == "Model gemma4:12b cannot call tools; pick one from the README list."
+    asyncio.run(_ollama({**LOCAL_SHOW, "capabilities": ["completion", "tools"]}).check_model())
+
+
+@pytest.mark.parametrize(
+    ("show", "tags"),
+    [
+        ({**LOCAL_SHOW, "remote_host": "https://ollama.com:443"}, None),
+        ({**LOCAL_SHOW, "remote_model": "gpt-oss:120b"}, None),
+        ({**LOCAL_SHOW, "remote_host": ""}, None),
+        (LOCAL_SHOW, {"models": [{"name": "gemma4:12b", "remote_model": "gemma4:12b"}]}),
+        (LOCAL_SHOW, {"models": [{"name": "gemma4:12b", "remote_host": None}]}),
+    ],
+)
+def test_check_model_refuses_a_model_with_a_remote_host(show: Any, tags: Any) -> None:
+    with pytest.raises(RemoteRefused, match="Model gemma4:12b is served from the cloud"):
+        asyncio.run(_ollama(show, tags=tags).check_model())
 
 
 @pytest.mark.parametrize("answer", [TimeoutError(), http_error(500), b"not json", b"[1]"])
@@ -277,7 +341,9 @@ def test_openai_flags_malformed_arguments() -> None:
 def test_openai_check_model_and_default() -> None:
     opener = Opener({"GET /v1/models": {"data": [{"id": "qwen"}, {"id": "other"}]}})
     asyncio.run(OpenAICompatBackend("qwen", opener=opener).check_model())
-    with pytest.raises(BackendError, match="Model zzz is not loaded"):
+    with pytest.raises(
+        BackendError, match=r"Model zzz is not available in LM Studio \(download or load it\)\."
+    ):
         asyncio.run(OpenAICompatBackend("zzz", opener=opener).check_model())
     unnamed = OpenAICompatBackend("", opener=opener)
     asyncio.run(unnamed.check_model())
@@ -374,13 +440,13 @@ def test_leading_think_block_is_stripped_in_both_dialects() -> None:
 
 def test_404_on_listing_means_not_running_but_on_chat_means_missing_model() -> None:
     tags = Opener({"GET /api/tags": http_error(404)})
-    with pytest.raises(BackendError, match="Ollama is not running at"):
+    with pytest.raises(BackendUnreachable, match="Ollama is not running at"):
         asyncio.run(OllamaBackend("m", opener=tags).check_model())
     models = Opener({"GET /v1/models": http_error(404)})
-    with pytest.raises(BackendError, match="LM Studio is not running at"):
+    with pytest.raises(BackendUnreachable, match="LM Studio is not running at"):
         asyncio.run(OpenAICompatBackend("m", opener=models).check_model())
     chat = Opener({"POST /v1/chat/completions": http_error(404)})
-    with pytest.raises(BackendError, match="is not loaded in LM Studio"):
+    with pytest.raises(BackendError, match="is not available in LM Studio"):
         asyncio.run(OpenAICompatBackend("m", opener=chat).chat([], []))
 
 
