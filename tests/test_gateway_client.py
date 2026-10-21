@@ -74,7 +74,7 @@ class StubClient:
     async def get_me(self) -> Any:
         if self.me_error is not None:
             raise self.me_error
-        return types.User(id=100, first_name="Slava", username="slava", access_hash=1)
+        return types.User(id=100, first_name="Alex", username="alex", access_hash=1)
 
     async def get_input_entity(self, value: Any) -> Any:
         self.entity_lookups.append(value)
@@ -162,12 +162,12 @@ async def test_input_user_parsing(gw: TelethonGateway):
     stub = _stub(gw)
     assert await gw._input_user(stub, None) is None
     by_id = await gw._input_user(stub, "333")
-    peer = await gw._input_user(stub, "@anna")
+    peer = await gw._input_user(stub, "@nora")
     assert isinstance(by_id, types.InputPeerUser)
     assert isinstance(peer, types.InputPeerUser)
-    assert stub.entity_lookups == [333, "@anna"]  # a numeric id is resolved now, as an int
+    assert stub.entity_lookups == [333, "@nora"]  # a numeric id is resolved now, as an int
     with pytest.raises(GatewayError, match="sender must be a user id or @username"):
-        await gw._input_user(stub, "Anna K")
+        await gw._input_user(stub, "Nora K")
 
 
 async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
@@ -175,7 +175,7 @@ async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
     stub.results.append(SimpleNamespace(messages=[_m(5, topic=7), _service(6)], users=[], chats=[]))
     hits = await gw.search_in_chat(
         FORUM_ID,
-        "lizing",
+        "granite",
         topic=7,
         sender="333",
         since=date(2026, 10, 1),
@@ -184,7 +184,7 @@ async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
     )
     request = stub.requests[0]
     assert isinstance(request, functions.messages.SearchRequest)
-    assert (request.q, request.top_msg_id, request.limit) == ("lizing", 7, 20)
+    assert (request.q, request.top_msg_id, request.limit) == ("granite", 7, 20)
     assert request.from_id == types.InputPeerUser(user_id=333, access_hash=1)
     assert request.min_date == datetime(2026, 10, 1, tzinfo=UTC)
     assert request.max_date == datetime(2026, 10, 3, tzinfo=UTC)
@@ -392,7 +392,7 @@ class LoginClient:
             self.session.auth_key = AuthKey(b"" * 256)
 
     async def get_me(self) -> Any:
-        return types.User(id=100, first_name="Slava", username="slava", access_hash=1)
+        return types.User(id=100, first_name="Alex", username="alex", access_hash=1)
 
     async def disconnect(self) -> None:
         LoginClient.disconnects += 1
@@ -454,7 +454,7 @@ async def test_login_removes_a_dead_session(login_settings: Settings, error: Exc
 
 async def test_login_writes_encrypted_secrets_and_no_session_file(login_settings: Settings):
     account = await gateway.interactive_login(login_settings, "the-hash")
-    assert (account.name, account.username) == ("Slava", "slava")
+    assert (account.name, account.username) == ("Alex", "alex")
     assert LoginClient.had_key is False
     assert _files(login_settings.home) == ["secrets.bin"]
     saved = secrets.read_secrets(login_settings.secrets_path)

@@ -18,10 +18,10 @@ A read-only Telegram connection for Claude Code.
 Every command below is typed in a terminal: open **Git Bash** or **PowerShell**, then go to the repository folder first:
 
 ```
-cd C:\Users\Slava\projects\telegram-mcp
+cd C:\path\to\telegram-mcp
 ```
 
-All later commands are run from that folder (they start with `.venv/Scripts/...`, which means "inside this folder").
+Replace `C:\path\to\telegram-mcp` with the folder you cloned into (here and in the registration command below). All later commands are run from that folder (they start with `.venv/Scripts/...`, which means "inside this folder").
 
 1. Get an API key. Open https://my.telegram.org, log in with your phone number, choose "API development tools" and create an application (any name and description). Note the `api_id` (a number) and the `api_hash` (a long string of letters and digits).
 2. Create the environment (once). Python 3.14 must be installed:
@@ -59,7 +59,7 @@ All later commands are run from that folder (they start with `.venv/Scripts/...`
 5. Register it with Claude Code (once):
 
    ```
-   claude mcp add --scope user telegram -- C:\Users\Slava\projects\telegram-mcp\.venv\Scripts\tgmcp.exe serve
+   claude mcp add --scope user telegram -- C:\path\to\telegram-mcp\.venv\Scripts\tgmcp.exe serve
    ```
 
    Then start a new Claude Code session; `telegram` appears in `/mcp`.
@@ -85,11 +85,11 @@ Every tool is read-only and does not reach beyond your account (annotations: rea
 | `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10, 0 to 30), `after` (10, 0 to 30) |
 
-Dates and times are UTC: `since` and `until` of `search_messages` are whole UTC days (both included), and a date and time without a time zone in `get_messages` is taken as UTC. Polish time is UTC+1 in winter and UTC+2 in summer, so a message sent just after midnight in Poland belongs to the previous UTC day.
+Dates and times are UTC: `since` and `until` of `search_messages` are whole UTC days (both included), and a date and time without a time zone in `get_messages` is taken as UTC. If you live east of Greenwich, a message sent just after your local midnight belongs to the previous UTC day.
 
 ## Search semantics
 
-Telegram search matches the beginnings of words, not fragments: "lizing" finds "lizingu", but "zing" finds nothing. When a search finds nothing, try another form of the word before concluding that the message does not exist.
+Telegram search matches the beginnings of words, not fragments: "market" finds "marketing", but "ket" finds nothing. When a search finds nothing, try another form of the word before concluding that the message does not exist.
 
 ## Hidden chats
 

@@ -37,7 +37,7 @@ class FakeGateway:
 
     async def me(self) -> Account:
         self._enter("me")
-        return Account(id=100, name="Slava", username="slava")
+        return Account(id=100, name="Alex", username="alex")
 
     async def dialogs(self) -> list[Chat]:
         self._enter("dialogs")

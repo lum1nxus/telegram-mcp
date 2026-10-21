@@ -13,7 +13,7 @@ TEXT_CAP = 2000
 RESULT_BUDGET = 60_000
 SEARCH_NOTE = (
     "Telegram's search matches the beginnings of words, not fragments: "
-    "'лизинг' finds 'лизингом' but not 'автолизинг'. Rephrase before concluding there is nothing."
+    "'market' finds 'marketing' but not 'supermarket'. Rephrase before concluding there is nothing."
 )
 
 

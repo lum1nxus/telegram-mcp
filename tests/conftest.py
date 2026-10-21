@@ -16,7 +16,7 @@ from tgmcp.server import build_server
 _NOW = datetime(2026, 10, 21, 12, 0, tzinfo=UTC)
 
 
-def _leasing_messages() -> list[Message]:
+def _hiking_messages() -> list[Message]:
     out: list[Message] = []
     for n in range(1, 121):
         fields: dict[str, object] = {
@@ -25,11 +25,11 @@ def _leasing_messages() -> list[Message]:
             "text": f"message {n}",
         }
         if n % 10:
-            fields.update(sender_id=333, sender_name="Ola")
+            fields.update(sender_id=333, sender_name="Ben")
         if n == 50:
-            fields["text"] = "Erste dał lizing bez problemu"
+            fields["text"] = "Granite peak route was easy"
         if n == 60:
-            fields["text"] = "VEHIS odmówił"
+            fields["text"] = "Ridge trail closed"
         if n == 120:
             fields["text"] = "x" * 4096
         out.append(make_message(n, **fields))
@@ -39,9 +39,9 @@ def _leasing_messages() -> list[Message]:
 @pytest.fixture
 def seed() -> FakeGateway:
     chats = [
-        make_chat(111, title="Anna", kind="user", username="anna"),
-        make_chat(-1001, title="Leasing PL", members=3),
-        make_chat(-1002, title="Leasing Poland"),
+        make_chat(111, title="Nora", kind="user", username="nora"),
+        make_chat(-1001, title="Hiking Club", members=3),
+        make_chat(-1002, title="Hiking Crew"),
         make_chat(
             -1003,
             title="Auto News",
@@ -63,9 +63,9 @@ def seed() -> FakeGateway:
     return FakeGateway(
         chats,
         {
-            -1001: _leasing_messages(),
+            -1001: _hiking_messages(),
             -1005: forum,
-            -1007: [make_message(1, chat_id=-1007, text="lizing secret terms")],
+            -1007: [make_message(1, chat_id=-1007, text="granite secret plan")],
         },
         {-1005: [make_topic(1, title="General"), make_topic(7, title="Cars")]},
     )

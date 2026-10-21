@@ -16,17 +16,17 @@ def _text(result: Any) -> str:
 
 
 async def test_search_in_chat_finds_prefix_and_sets_note(call: Call) -> None:
-    result = await call("search_messages", {"query": "lizin", "chat": "Leasing PL"})
+    result = await call("search_messages", {"query": "granit", "chat": "Hiking Club"})
     assert not result.is_error
     data = result.structured_content or {}
     assert [h["id"] for h in data["hits"]] == [50]
     assert data["note"] == SEARCH_NOTE
-    assert data["scope"] == "Leasing PL"
+    assert data["scope"] == "Hiking Club"
 
 
 async def test_global_search_drops_hidden_chat_hits(call: Call, seed: FakeGateway) -> None:
     assert any(m.chat_id == -1007 for m in seed.messages[-1007])
-    result = await call("search_messages", {"query": "lizing"})
+    result = await call("search_messages", {"query": "granite"})
     assert not result.is_error
     data = result.structured_content or {}
     assert [h["chat_id"] for h in data["hits"]] == [-1001]
@@ -38,7 +38,7 @@ async def test_search_needs_query_or_chat(call: Call) -> None:
     result = await call("search_messages", {"query": ""})
     assert result.is_error
     assert "needs a query" in _text(result)
-    for extra in ({"sender": "@anna"}, {"topic": 7}):
+    for extra in ({"sender": "@nora"}, {"topic": 7}):
         result = await call("search_messages", {"query": "x", **extra})
         assert result.is_error
         assert "need a chat" in _text(result)

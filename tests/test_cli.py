@@ -29,7 +29,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 async def _logged_in(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
     """What a successful interactive_login leaves behind: the encrypted secrets file only."""
     secrets.write_secrets(settings.secrets_path, api_hash, make_session_string())
-    return Account(id=9, name="Slava", username=None)
+    return Account(id=9, name="Alex", username=None)
 
 
 def _names(folder: Path) -> list[str]:
@@ -84,7 +84,7 @@ def test_whoami_prints_account_counts_and_hidden(env, capsys, monkeypatch):
     monkeypatch.setattr(cli, "factory", lambda settings: fake)
     assert cli.main(["whoami"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == "account: Slava (@slava)"
+    assert lines[0] == "account: Alex (@alex)"
     assert lines[1] == "chats: 2 (archived 1, hidden 1)"
     assert "  hidden: Secret (2)" in lines
     assert "  hidden: Ghost (not found)" in lines
@@ -115,7 +115,7 @@ def test_whoami_with_only_old_files_asks_to_move_them(env, capsys):
 def test_login_with_saved_credentials_leaves_only_the_secrets_file(env, capsys, monkeypatch):
     monkeypatch.setattr(cli, "interactive_login", _logged_in)
     assert cli.main(["login"]) == 0
-    assert "logged in as Slava" in capsys.readouterr().out
+    assert "logged in as Alex" in capsys.readouterr().out
     assert _names(env) == ["secrets.bin"]
     assert secrets.read_secrets(env / "secrets.bin").api_hash == "a"
 
@@ -390,7 +390,7 @@ def test_login_and_serve_restrict_a_new_home(tmp_path, monkeypatch):
     monkeypatch.setenv("TGMCP_API_HASH", "a")
 
     async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
-        return Account(id=9, name="Slava", username=None)
+        return Account(id=9, name="Alex", username=None)
 
     monkeypatch.setattr(cli, "interactive_login", fake_login)
     login_home = tmp_path / "login"

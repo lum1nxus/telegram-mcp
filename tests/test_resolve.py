@@ -16,19 +16,19 @@ async def test_resolve_by_id_username_title_and_fragment(seed):
     d = resolve.Directory(seed, hidden=[])
     assert (await d.resolve("-1001")).id == -1001
     assert (await d.resolve("@autonews")).id == -1003
-    assert (await d.resolve("Leasing PL")).id == -1001
-    assert (await d.resolve("poland")).id == -1002
+    assert (await d.resolve("Hiking Club")).id == -1001
+    assert (await d.resolve("crew")).id == -1002
 
 
 async def test_fragment_matching_two_chats_is_ambiguous(seed):
     d = resolve.Directory(seed, hidden=[])
     with pytest.raises(resolve.Ambiguous) as e:
-        await d.resolve("leasing")
-    assert "Leasing PL (-1001)" in str(e.value)
-    assert "Leasing Poland (-1002)" in str(e.value)
+        await d.resolve("hiking")
+    assert "Hiking Club (-1001)" in str(e.value)
+    assert "Hiking Crew (-1002)" in str(e.value)
     assert [c.id for c in e.value.candidates] == [-1001, -1002]
     assert str(e.value) == (
-        "Several chats match 'leasing': Leasing PL (-1001), Leasing Poland (-1002). "
+        "Several chats match 'hiking': Hiking Club (-1001), Hiking Crew (-1002). "
         "Call again with the id."
     )
 
@@ -61,7 +61,7 @@ async def test_archived_chat_resolves(seed):
 async def test_miss_refreshes_once(seed):
     clock = Clock()
     d = resolve.Directory(seed, hidden=[], refresh_after_s=60.0, clock=clock)
-    await d.resolve("Anna")
+    await d.resolve("Nora")
     assert seed.calls.count("dialogs") == 1
     seed.chats.append(make_chat(-2000, title="Fresh Arrival"))
     clock.now = 100.0
