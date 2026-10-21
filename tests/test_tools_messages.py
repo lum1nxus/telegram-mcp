@@ -38,7 +38,7 @@ async def test_search_needs_query_or_chat(call: Call) -> None:
     result = await call("search_messages", {"query": ""})
     assert result.is_error
     assert "needs a query" in _text(result)
-    for extra in ({"sender": "@anna"}, {"topic": 7}):
+    for extra in ({"sender": "@nora"}, {"topic": 7}):
         result = await call("search_messages", {"query": "x", **extra})
         assert result.is_error
         assert "need a chat" in _text(result)

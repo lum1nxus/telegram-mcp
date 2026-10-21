@@ -162,12 +162,12 @@ async def test_input_user_parsing(gw: TelethonGateway):
     stub = _stub(gw)
     assert await gw._input_user(stub, None) is None
     by_id = await gw._input_user(stub, "333")
-    peer = await gw._input_user(stub, "@anna")
+    peer = await gw._input_user(stub, "@nora")
     assert isinstance(by_id, types.InputPeerUser)
     assert isinstance(peer, types.InputPeerUser)
-    assert stub.entity_lookups == [333, "@anna"]  # a numeric id is resolved now, as an int
+    assert stub.entity_lookups == [333, "@nora"]  # a numeric id is resolved now, as an int
     with pytest.raises(GatewayError, match="sender must be a user id or @username"):
-        await gw._input_user(stub, "Anna K")
+        await gw._input_user(stub, "Nora K")
 
 
 async def test_search_in_chat_builds_search_request(gw: TelethonGateway):

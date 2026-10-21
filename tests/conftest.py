@@ -25,7 +25,7 @@ def _hiking_messages() -> list[Message]:
             "text": f"message {n}",
         }
         if n % 10:
-            fields.update(sender_id=333, sender_name="Ola")
+            fields.update(sender_id=333, sender_name="Ben")
         if n == 50:
             fields["text"] = "Granite peak route was easy"
         if n == 60:
@@ -39,7 +39,7 @@ def _hiking_messages() -> list[Message]:
 @pytest.fixture
 def seed() -> FakeGateway:
     chats = [
-        make_chat(111, title="Anna", kind="user", username="anna"),
+        make_chat(111, title="Nora", kind="user", username="nora"),
         make_chat(-1001, title="Hiking Club", members=3),
         make_chat(-1002, title="Hiking Crew"),
         make_chat(

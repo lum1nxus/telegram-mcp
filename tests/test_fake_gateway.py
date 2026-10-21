@@ -5,7 +5,7 @@ from tgmcp.gateway import GatewayError
 
 async def test_search_matches_word_prefixes_not_fragments(seed):
     hits = await seed.search_in_chat(
-        -1001, "liz", topic=None, sender=None, since=None, until=None, limit=10
+        -1001, "gran", topic=None, sender=None, since=None, until=None, limit=10
     )
     assert [m.id for m in hits] == [50]
     none = await seed.search_in_chat(
@@ -45,7 +45,7 @@ async def test_raise_next_fires_once(seed):
 async def test_sender_username_maps_to_user_id(seed):
     seed.messages[-1001][0] = seed.messages[-1001][0].model_copy(update={"sender_id": 111})
     hits = await seed.search_in_chat(
-        -1001, "", topic=None, sender="@anna", since=None, until=None, limit=5
+        -1001, "", topic=None, sender="@nora", since=None, until=None, limit=5
     )
     assert [m.id for m in hits] == [1]
     with pytest.raises(GatewayError, match=r"No user @x in your chats."):

@@ -18,7 +18,7 @@ def make_message(id: int, **overrides: Any) -> Message:
         "topic_id": None,
         "date": _WHEN,
         "sender_id": 222,
-        "sender_name": "Marek",
+        "sender_name": "Sam",
         "text": "hello",
     }
     return Message(**{**fields, **overrides})

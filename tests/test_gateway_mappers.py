@@ -77,9 +77,9 @@ def test_dialog_of_broadcast_channel_and_user():
     assert channel.kind == "channel"
     assert channel.is_forum is False
     assert channel.archived is False
-    user = types.User(id=111, first_name="Anna", username="anna", access_hash=9)
+    user = types.User(id=111, first_name="Nora", username="nora", access_hash=9)
     chat = chat_from_dialog(_dialog(user, types.PeerUser(111)))
-    assert (chat.id, chat.kind, chat.title, chat.username) == (111, "user", "Anna", "anna")
+    assert (chat.id, chat.kind, chat.title, chat.username) == (111, "user", "Nora", "nora")
 
 
 def test_message_in_forum_topic():
@@ -222,11 +222,11 @@ async def test_idle_guard_stop_ends_without_firing():
 
 def test_sender_name_from_known_entity():
     client = SimpleNamespace(_self_id=1, _mb_entity_cache=SimpleNamespace(get=lambda _id: None))
-    ola = types.User(id=333, first_name="Ola", last_name="K", access_hash=9)
+    ben = types.User(id=333, first_name="Ben", last_name="K", access_hash=9)
     m = _msg(message="x", from_id=types.PeerUser(333))
-    m._finish_init(client, {333: ola}, None)
+    m._finish_init(client, {333: ben}, None)
     out = message_from_telethon(m, -1, is_forum=False, public_username=None)
-    assert (out.sender_id, out.sender_name) == (333, "Ola K")
+    assert (out.sender_id, out.sender_name) == (333, "Ben K")
 
 
 def test_video_sticker_is_a_sticker():
