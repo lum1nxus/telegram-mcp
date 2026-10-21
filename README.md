@@ -227,7 +227,7 @@ What tgmcp cannot see:
 - cmd.exe: `.venv\Scripts\tgmcp bench --model qwen3.5:9b`
 - `--set smoke`: only five questions, for a quick check. `--repeat 3`: ask each question three times (small models do not always answer the same way). `--think`: with thinking. `--json log.json`: save every question, tool call and answer to a file.
 
-How to read the table: one line per kind of question (finding a chat, reading history, paging back, reading around a message, forum topics, hidden chats, refusing to write, Polish and Russian questions), then `total`. `n` is the number of runs. The four percentages say how often the model called the right tools (`tools`), with the right arguments (`args`), wrote an answer that contains the expected facts (`answer`), and named no chat or message id it had not seen in a tool answer (`no_inv`, "no invention"; dates are not checked). `steps` is the average number of tool calls, `s` the average seconds per question. Higher percentages are better. Compare models with the same `think` and `repeat` (both are shown in the first line).
+How to read the table: one line per kind of question (finding a chat, reading history, paging back, reading around a message, forum topics, hidden chats, refusing to write, Polish and Russian questions), then `total`. `n` is the number of runs. The four percentages say how often the model called the right tools (`tools`), with the right arguments (`args`), wrote an answer that contains the expected facts (`answer`), and named nothing it had not seen in the question or a tool answer (`no_inv`, "no invention": it checks chat ids, message ids cited as ids, and the seed's chat titles; dates and other names are not checked). `steps` is the average number of tool calls, `s` the average seconds per question; the first question's time includes loading the model into memory. Higher percentages are better. The language of the answer is not scored. Compare models with the same `ctx` (the context length), `think` and `repeat` (all shown in the first line; with LM Studio, `ctx=app` means the length set in LM Studio).
 
 ### Which model
 
@@ -246,7 +246,7 @@ Published numbers come from other tests and are only a pointer. What decides is 
 
 - One question per run: `tgmcp ask` does not remember the previous question, so put everything into one question.
 - Answers are weaker than Claude's, most of all on long summaries of many messages.
-- The bench's `no_inv` checks invented ids and chat titles only; a wrong date or a wrong retelling is caught only where a question's rules expect a specific fact.
+- The bench's `no_inv` checks chat ids, message ids cited as ids, and the seed's chat titles; dates and other names are not checked, so a wrong date or a wrong retelling is caught only where a question's rules expect a specific fact.
 - Telegram's search needs the word in the chat's language: a model asked in Russian about English messages must search with the English word, and small models do not always do that.
 
 ## Several Claude sessions and the VPN caveat

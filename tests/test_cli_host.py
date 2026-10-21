@@ -11,7 +11,7 @@ from tests.test_host_scorer import IDEAL
 from tgmcp import cli, config
 from tgmcp.config import Settings
 from tgmcp.gateway import NotLoggedIn
-from tgmcp.host.backends import BackendError, ModelTurn, RemoteRefused, ToolCall
+from tgmcp.host.backends import BackendError, ModelTurn, OllamaBackend, RemoteRefused, ToolCall
 from tgmcp.host.benchdata import QUESTIONS, SMOKE_IDS, build_seed
 from tgmcp.host.loop import RunResult, Step
 
@@ -246,10 +246,30 @@ def test_bench_smoke_scores_100_without_telegram(no_telegram, capsys, monkeypatc
     assert cli.main(["bench", "--model", "gemma4:12b", "--set", "smoke"]) == 0
     out, err = capsys.readouterr()
     lines = out.splitlines()
-    assert lines[0] == "model=gemma4:12b backend=ollama think=off repeat=1"
+    assert lines[0] == "model=gemma4:12b backend=ollama ctx=16384 think=off repeat=1"
     assert _total(out)[1:6] == ["5", "100%", "100%", "100%", "100%"]
     assert seen == [{"kind": "ollama", "model": "gemma4:12b", "url": None, "think": False}]
     assert err == ""
+
+
+def test_bench_header_for_lmstudio(no_telegram, capsys, monkeypatch):
+    _scripted(monkeypatch, ScriptedBackend("qwen"))
+    assert cli.main(["bench", "--backend", "lmstudio", "--model", "qwen", "--set", "smoke"]) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first == "model=qwen backend=lmstudio ctx=app think=n/a repeat=1"
+
+
+def test_bench_header_shows_the_ollama_context(no_telegram, capsys, monkeypatch):
+    real = OllamaBackend("m", num_ctx=8192)
+    _scripted(monkeypatch, real)
+
+    async def no_runs(*args: Any) -> tuple[list[Any], None]:
+        return [], None
+
+    monkeypatch.setattr(cli, "_bench", no_runs)
+    assert cli.main(["bench", "--model", "m", "--set", "smoke"]) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first == "model=m backend=ollama ctx=8192 think=off repeat=1"
 
 
 def test_bench_one_wrong_answer_scores_less(no_telegram, capsys, monkeypatch):
@@ -264,7 +284,7 @@ def test_bench_json_and_repeat(no_telegram, tmp_path, capsys, monkeypatch):
     argv = ["bench", "--model", "m", "--set", "smoke", "--repeat", "2", "--think"]
     assert cli.main([*argv, "--json", str(path)]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "model=scripted backend=ollama think=on repeat=2"
+    assert out.splitlines()[0] == "model=scripted backend=ollama ctx=16384 think=on repeat=2"
     rows = json.loads(path.read_text(encoding="utf-8"))
     assert [(r["id"], r["run"]) for r in rows] == [(i, n) for i in SMOKE_IDS for n in (1, 2)]
     first = rows[0]

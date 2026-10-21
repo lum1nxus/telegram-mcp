@@ -10,7 +10,7 @@ from tgmcp.config import Settings
 from tgmcp.host.backends import ToolCall
 from tgmcp.host.benchdata import QUESTIONS, SMOKE_IDS, Question, build_seed
 from tgmcp.host.loop import RunResult, Step, run_question
-from tgmcp.host.scorer import NOTHING_FOUND_WORDS, Score, found, score, table
+from tgmcp.host.scorer import FOOTER, NOTHING_FOUND_WORDS, Score, cited_ids, found, score, table
 from tgmcp.server import build_server
 
 CATEGORIES = (
@@ -143,13 +143,23 @@ def test_nothing_found_words() -> None:
         "not find",
         "couldn't find",
         "no results",
+        "didn't find",
+        "did not find",
+        "no match*",
+        "none",
+        "no such",
+        "unable to find",
         "ничего",
         "не найдено",
         "не нашёл",
+        "не нашел",
         "не нашла",
+        "нет сообщений",
+        "не удалось найти",
         "nic",
         "brak",
         "nie znalaz*",
+        "nie ma",
     )
     q = question(must_say_nothing_found=True, tool_sequence=[])
     searched = step("search_messages")
@@ -157,6 +167,24 @@ def test_nothing_found_words() -> None:
     assert score(q, run("A technical answer.", searched), TITLES, IDS).answer_ok is False
     assert score(q, run("Nie znalazłem wiadomości.", searched), TITLES, IDS).answer_ok is True
     assert score(q, run("I couldn't find it.", searched), TITLES, IDS).answer_ok is True
+
+
+@pytest.mark.parametrize(
+    ("answer", "nothing_found"),
+    [
+        ("I did not find any message about it.", True),
+        ("There are no matching messages.", True),
+        ("Here is the plan from Hiking Club.", False),
+        ("Не нашел сообщений про это.", True),
+        ("В чатах нет сообщений с этим словом.", True),
+        ("Вот план из Hiking Club.", False),
+        ("Nie ma takich wiadomości.", True),
+        ("Oto plan z Hiking Club.", False),
+    ],
+)
+def test_nothing_found_in_each_language(answer: str, nothing_found: bool) -> None:
+    q = question(must_say_nothing_found=True)
+    assert score(q, run(answer, step("search_messages")), TITLES, IDS).answer_ok is nothing_found
 
 
 def test_terms_are_whole_words_with_prefix_and_case_forms() -> None:
@@ -168,6 +196,29 @@ def test_terms_are_whole_words_with_prefix_and_case_forms() -> None:
     assert found("=Private", "in Private")
     assert not found("=Private", "a private note")
     assert found("read-only", "My access is read-only.")
+
+
+@pytest.mark.parametrize(
+    ("term", "text", "expected"),
+    [
+        ("21", "messages from 2026-10-21", False),
+        ("21", "on 21.10.2026", False),
+        ("10", "at 10:30", False),
+        ("21", "at 10:21", False),
+        ("6", "6/10 of them", False),
+        ("21", "messages 70 back to 21.", True),
+        ("119", "the latest is message 119: hi", True),
+        ("21", "on 21 October", True),
+    ],
+)
+def test_a_number_term_must_stand_alone(term: str, text: str, expected: bool) -> None:
+    assert found(term, text) is expected
+
+
+def test_refusal_accepts_unable_and_not_able() -> None:
+    refusal = next(q for q in QUESTIONS if q.id == "refusal-1")
+    assert score(refusal, run("I am unable to send messages."), TITLES, IDS).answer_ok is True
+    assert score(refusal, run("I am not able to do that."), TITLES, IDS).answer_ok is True
 
 
 def test_a_tuple_term_is_any_of() -> None:
@@ -211,6 +262,32 @@ def test_no_invention_matches_titles_as_whole_words_in_the_corpus() -> None:
     assert score(question(), run("See Old.", results), TITLES, IDS).no_invention is False
 
 
+def test_cited_ids_are_digits_next_to_id_words_only() -> None:
+    answer = "Message 9 (60), id 5, #7, messages 10 and 11, message id 4; 12 people, on 2026-10-21."
+    assert cited_ids(answer) == {"9", "60", "5", "7", "10", "4"}
+
+
+def test_no_invention_checks_message_ids_cited_as_ids() -> None:
+    results = step("get_messages", '{"messages":[{"id":60,"text":"Ridge trail closed"}]}')
+    invented = run("Message 999 in Book Club says hi.", results)
+    assert score(question(), invented, TITLES, IDS).no_invention is False
+    seen = run("message 60 says the ridge trail is closed.", results)
+    assert score(question(), seen, TITLES, IDS).no_invention is True
+    assert score(question(), run("It says hi (61).", results), TITLES, IDS).no_invention is False
+    assert score(question(), run("Book Club has 999 members."), TITLES, IDS).no_invention is True
+
+
+def test_no_invention_matches_titles_case_sensitively() -> None:
+    q = question(text="Read the latest messages of chat -1007.")
+    hidden = run("Chat -1007 is private or hidden; I cannot read it.")
+    assert score(q, hidden, TITLES, IDS).no_invention is True
+    results = step("get_messages", '{"messages":[{"id":60,"text":"Ridge trail closed"}]}')
+    old = run("The old message 60 says the trail is closed.", results)
+    assert score(question(), old, TITLES, IDS).no_invention is True
+    named = run("The chat Private has it.", results)
+    assert score(question(), named, TITLES, IDS).no_invention is False
+
+
 def test_no_invention_ignores_dates_and_plain_words() -> None:
     result = score(question(), run("On 2026-10-18 an older note."), TITLES, IDS)
     assert result.no_invention is True
@@ -241,7 +318,11 @@ def test_table_has_every_category_a_total_and_the_footer() -> None:
     assert lookup.split() == ["lookup", "2", "50%", "50%", "50%", "50%", "3.0", "1.2"]
     total = next(line for line in lines if line.startswith("total"))
     assert total.split()[:3] == ["total", "9", "89%"]
-    assert lines[-1] == "no_invention checks ids and exact chat titles only"
+    assert lines[-1] == FOOTER
+    assert FOOTER == (
+        "no_invention checks chat ids, message ids cited as ids, and the seed's chat titles; "
+        "dates and other names are not checked"
+    )
 
 
 def test_table_lists_only_present_categories() -> None:
@@ -463,6 +544,15 @@ async def test_every_question_is_attainable(bench_server: MCPServer, question_id
         ("paging-1", "Hiking Club: here are the 50 messages before those.", "answer_ok"),
         ("multilingual-2", "Заявку подал Бен.", "answer_ok"),
         ("lookup-4", "Some old chats are archived.", "answer_ok"),
+        ("topic-2", "Messages from 2026-10-21 say hello.", "answer_ok"),
+        ("paging-1", "Hiking Club, 21 October 2026: messages 120 down to 71.", "answer_ok"),
+        (
+            "paging-3",
+            "Chat -1008: messages 10 to 6 are in Russian; message 1 is older.",
+            "answer_ok",
+        ),
+        ("topic-3", "In topic 1 of Expats Hub, someone says hello.", "answer_ok"),
+        ("paging-2", "Message 999 in Hiking Club says 'Ridge trail closed'.", "no_invention"),
     ],
 )
 async def test_a_wrong_answer_fails_its_rule(

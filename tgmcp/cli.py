@@ -25,7 +25,15 @@ from tgmcp.config import (
     save_credentials,
 )
 from tgmcp.gateway import MIGRATE, NO_TERMINAL, ApiKeyError, GatewayError, NotLoggedIn
-from tgmcp.host.backends import BackendError, ChatBackend, ModelTurn, RemoteRefused, make_backend
+from tgmcp.host.backends import (
+    DEFAULT_NUM_CTX,
+    BackendError,
+    ChatBackend,
+    ModelTurn,
+    OllamaBackend,
+    RemoteRefused,
+    make_backend,
+)
 from tgmcp.host.benchdata import BENCH_HIDDEN_CHATS, QUESTIONS, SMOKE_IDS, Question, build_seed
 from tgmcp.host.loop import DEFAULT_MAX_STEPS, RunResult, Step, run_question
 from tgmcp.host.scorer import Score, score, table
@@ -355,6 +363,14 @@ async def _bench(
     return runs, None
 
 
+def _settings_line(args: argparse.Namespace, backend: ChatBackend) -> str:
+    """Context length and thinking as the run used them; LM Studio sets both in its own app."""
+    if args.backend == "lmstudio":
+        return f"ctx=app think=n/a repeat={args.repeat}"
+    ctx = backend.num_ctx if isinstance(backend, OllamaBackend) else DEFAULT_NUM_CTX
+    return f"ctx={ctx} think={'on' if args.think else 'off'} repeat={args.repeat}"
+
+
 def _bench_command(args: argparse.Namespace) -> int:
     chosen = set(SMOKE_IDS) if args.set == "smoke" else None
     questions = [q for q in QUESTIONS if chosen is None or q.id in chosen]
@@ -364,10 +380,7 @@ def _bench_command(args: argparse.Namespace) -> int:
     except (RemoteRefused, BackendError) as exc:
         _complain(str(exc))
         return 1
-    header = (
-        f"model={backend.model} backend={args.backend} "
-        f"think={'on' if args.think else 'off'} repeat={args.repeat}"
-    )
+    header = f"model={backend.model} backend={args.backend} {_settings_line(args, backend)}"
     # Every run is a row: a percentage over N runs per question is the mean of its flags.
     _say(table([(run.question, run.score) for run in runs], header))
     if args.json is not None:
