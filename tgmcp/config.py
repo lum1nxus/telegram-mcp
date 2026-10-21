@@ -146,19 +146,21 @@ def restrict_to_owner(path: Path) -> None:
     if sys.platform == "win32":
         # The inheritance flags (OI)(CI) are for folders; on a file they leave an empty ACL.
         rights = "(OI)(CI)F" if path.is_dir() else "F"
-        subprocess.run(
-            [
-                _system_tool("icacls.exe"),
-                str(path),
-                "/inheritance:r",
-                "/grant:r",
-                f"*{_owner_sid()}:{rights}",
-            ],
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            check=True,
-        )
+        icacls = _system_tool("icacls.exe")
+        # /reset drops every explicit entry (an administrator's temp folder carries SYSTEM,
+        # Administrators and OWNER RIGHTS as explicit entries, which /grant:r would keep), so
+        # that after removing inheritance exactly one entry remains: the owner's.
+        for args in (
+            ["/reset"],
+            ["/inheritance:r", "/grant:r", f"*{_owner_sid()}:{rights}"],
+        ):
+            subprocess.run(
+                [icacls, str(path), *args],
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=True,
+            )
     else:
         path.chmod(0o700 if path.is_dir() else 0o600)
 
