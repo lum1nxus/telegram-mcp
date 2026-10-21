@@ -19,6 +19,8 @@ You need Python 3.14, Git, Claude Code and a Telegram API key (how to get one: "
 
 In **cmd.exe** write the paths with backslashes: `.venv\Scripts\tgmcp login`. The details of every step are below.
 
+To use a model on your own computer instead of Claude, see "Local models (nothing leaves your computer)".
+
 ## What it is
 
 `tgmcp` lets Claude Code look into your own Telegram account: list your chats, search messages and read a conversation. It runs on your computer, logs in as you (through your own Telegram API key) and answers only when Claude asks.
@@ -153,7 +155,7 @@ What hiding does not cover:
 Everything lives in one folder: `%LOCALAPPDATA%\telegram-mcp` on Windows (or the folder in `TGMCP_HOME`).
 
 - `secrets.bin`: the API hash and the login key, encrypted with Windows DPAPI for your Windows user account. A copy is useless on another PC or under another Windows user, unless the attacker also has your Windows profile's DPAPI master keys and your password (a full profile backup). It still opens for any program running as you, so keep the PC clean.
-- `config.json`: the settings that are not secret: API id, hidden chats.
+- `config.json`: the settings that are not secret: API id, hidden chats, the default local model (`local_model`).
 - `tgmcp-<number>.log`: a technical log without message text, one file per running server (the number is its process id). Files older than 7 days are removed automatically.
 
 When tgmcp creates the folder, it makes it readable only by your Windows user (a folder that already exists is left as it is), and `secrets.bin` is restricted the same way. If you think the login key leaked, run `.venv/Scripts/tgmcp logout`, or end the session in Telegram under Settings, Devices.
@@ -163,6 +165,89 @@ On systems other than Windows there is no encryption: `secrets.bin` is a plain f
 If an administrator resets your Windows password (instead of you changing it yourself), Windows may no longer be able to decrypt `secrets.bin`. tgmcp then says so; run `.venv/Scripts/tgmcp login` again.
 
 Versions before 21.10.2026 kept the hash in `config.json` and the login in `telegram.session`, both in clear text. If those files are still there, tgmcp says "Old clear-text files found"; run `.venv/Scripts/tgmcp login` once. It moves the existing login into `secrets.bin` (no new code from Telegram) and removes the old files. Removing them does not shred them: copies in backups, cloud sync or Windows shadow copies stay valid until you run `.venv/Scripts/tgmcp logout`.
+
+## Local models (nothing leaves your computer)
+
+Claude is a cloud model: what a tool returns (your messages) goes to Anthropic as part of the conversation. If you would rather keep your chats away from any AI company, tgmcp can work with a model that runs on your own computer instead. Your questions, the messages the tools read and the model's answers then stay on this PC. tgmcp itself still fetches the messages from Telegram's servers, as always.
+
+The price: a local model is much smaller than Claude, so its answers are simpler and it makes more mistakes (see "Limits" below). You need a graphics card with about 8 to 12 GB of memory, or patience: on the processor alone it works, but slowly.
+
+There are two ways. **LM Studio** is a program with a chat window, like the Claude app; it is the easiest. **Ollama with `tgmcp ask`** answers one question in a terminal; it is also how you measure which model works best (`tgmcp bench`). Both need `.venv/Scripts/tgmcp login` once before, as for Claude Code.
+
+### LM Studio (a chat window)
+
+1. Download LM Studio from https://lmstudio.ai and install it.
+2. In LM Studio, search for one of the models from "Which model" below (for example "qwen3.5 9b"), download it and load it.
+3. When you load the model, set the **context length to at least 8192** (16384 is better if it fits). A shorter context cuts off the tool answers.
+4. Open the **Program** tab on the right, then **Install**, then **Edit mcp.json**. Paste this inside the `mcpServers` object (replace the path with your folder; keep the doubled backslashes):
+
+   ```json
+   "telegram": {
+     "command": "C:\\path\\to\\telegram-mcp\\.venv\\Scripts\\tgmcp.exe",
+     "args": ["serve"]
+   }
+   ```
+
+   If `mcpServers` already holds other servers, put a comma after the neighbouring entry. Save the file.
+5. In LM Studio's server settings (the **Developer** tab), keep **"Serve on local network" switched off**, so LM Studio's own server stays reachable from this computer only.
+6. Start a new chat and ask. Before each tool call LM Studio shows a confirmation dialog with the tool name and its arguments; allow it. The dialog does not show what the tool returned; the model's answer is built from it.
+
+### Ollama and `tgmcp ask` (one question in a terminal)
+
+1. Install Ollama from https://ollama.com.
+2. Download a model (about 6 GB): `ollama pull qwen3.5:9b`
+3. In the repository folder, ask:
+   - Git Bash or PowerShell: `.venv/Scripts/tgmcp ask "What did Nora say about the boots?"`
+   - cmd.exe: `.venv\Scripts\tgmcp ask "What did Nora say about the boots?"`
+
+Only the answer is printed. Useful options:
+
+- `--model gemma4:12b`: another installed model. Without it tgmcp takes `local_model` from `config.json` (or the variable `TGMCP_LOCAL_MODEL`), else the first model Ollama lists. To make a model the default, add `"local_model": "qwen3.5:9b"` to `config.json`.
+- `--show-calls`: also print each tool call and the size of its answer, for example `-> search_messages(query="boots") 2311 chars`. "cut" means tgmcp shortened a long answer before passing it to the model.
+- `--backend lmstudio`: use LM Studio's server instead of Ollama (start it in LM Studio's Developer tab first).
+- `--think`: let the model think before answering (slower, sometimes better).
+- `--max-steps 8`: how many times the model may turn to the tools before it must answer.
+
+If the model does not finish, tgmcp prints `(unfinished after N steps)` and what the model had found so far. Ask a narrower question (one chat, a shorter period).
+
+### What "local only" checks, and what it cannot see
+
+`tgmcp ask` and `tgmcp bench` refuse to talk to anything but this computer: the address must be `http://127.0.0.1`, `http://localhost` or `http://[::1]` (any port), system proxies are bypassed and a redirect to another address is refused. There is no option to turn this off. Ollama can also run "cloud" models that only look local (their names end in `-cloud`); tgmcp refuses those by name, and also when Ollama cannot tell the model's size and quantization, which a cloud model does not have.
+
+What tgmcp cannot see:
+
+- Inside the **LM Studio window**, LM Studio is in charge, not tgmcp. Its own online features (searching and downloading models, updates, any cloud or remote feature it offers) are outside tgmcp's control. Check its settings yourself.
+- Other software on your PC (a VPN, a program that reads your screen) is outside any tool's control.
+
+### Which model works best: `tgmcp bench`
+
+`tgmcp bench` asks a model 30 fixed questions about an **invented** account built into tgmcp (no login, none of your chats) and checks the answers with fixed rules. It takes a few minutes per model.
+
+- Git Bash or PowerShell: `.venv/Scripts/tgmcp bench --model qwen3.5:9b`
+- cmd.exe: `.venv\Scripts\tgmcp bench --model qwen3.5:9b`
+- `--set smoke`: only five questions, for a quick check. `--repeat 3`: ask each question three times (small models do not always answer the same way). `--think`: with thinking. `--json log.json`: save every question, tool call and answer to a file.
+
+How to read the table: one line per kind of question (finding a chat, reading history, paging back, reading around a message, forum topics, hidden chats, refusing to write, Polish and Russian questions), then `total`. `n` is the number of runs. The four percentages say how often the model called the right tools (`tools`), with the right arguments (`args`), wrote an answer that contains the expected facts (`answer`), and named no chat or message id it had not seen in a tool answer (`no_inv`, "no invention"; dates are not checked). `steps` is the average number of tool calls, `s` the average seconds per question. Higher percentages are better. Compare models with the same `think` and `repeat` (both are shown in the first line).
+
+### Which model
+
+Candidates that fit a 12 GB graphics card (all in Ollama's library, 6 to 9 GB each):
+
+| Model | Download | Published pointer |
+|---|---|---|
+| Qwen 3.5, 9 B | `ollama pull qwen3.5:9b` | BFCL-V4 (a tool-calling benchmark) 66.1, per https://vdf.ai/blog/best-local-llm-by-vram/ |
+| Gemma 4, 12 B | `ollama pull gemma4:12b` | none collected |
+| Ministral 3, 14 B | `ollama pull ministral-3:14b` | none collected |
+| Qwen 3, 14 B | `ollama pull qwen3:14b` | none collected |
+
+Published numbers come from other tests and are only a pointer. What decides is our own `tgmcp bench`: run it on the models that fit your computer and keep the one with the best `total` line.
+
+### Limits
+
+- One question per run: `tgmcp ask` does not remember the previous question, so put everything into one question.
+- Answers are weaker than Claude's, most of all on long summaries of many messages.
+- The bench's `no_inv` checks invented ids and chat titles only; a wrong date or a wrong retelling is caught only where a question's rules expect a specific fact.
+- Telegram's search needs the word in the chat's language: a model asked in Russian about English messages must search with the English word, and small models do not always do that.
 
 ## Several Claude sessions and the VPN caveat
 

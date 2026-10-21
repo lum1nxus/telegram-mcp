@@ -149,3 +149,26 @@ def test_remove_legacy_files_keeps_other_settings(tmp_path):
     assert json.loads(cfg.read_text(encoding="utf-8")) == {"api_id": 1, "hidden_chats": ["@x"]}
     assert config.legacy_files(settings) == []
     assert config.legacy_api_hash(tmp_path) is None
+
+
+def test_local_model_from_file_and_env(tmp_path):
+    (tmp_path / "config.json").write_text(
+        '{"api_id": 1, "local_model": "qwen3.5:9b"}', encoding="utf-8"
+    )
+    env = {"TGMCP_HOME": str(tmp_path)}
+    assert config.load_settings(env).local_model == "qwen3.5:9b"
+    assert config.load_settings({**env, "TGMCP_LOCAL_MODEL": "gemma4:12b"}).local_model == (
+        "gemma4:12b"
+    )
+    (tmp_path / "config.json").write_text('{"api_id": 1}', encoding="utf-8")
+    assert config.load_settings(env).local_model is None
+
+
+def test_save_and_forget_credentials_keep_local_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "restrict_to_owner", lambda p: None)
+    path = tmp_path / "config.json"
+    path.write_text('{"api_id": 1, "local_model": "qwen3:14b"}', encoding="utf-8")
+    config.save_credentials(5, tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["local_model"] == "qwen3:14b"
+    config.forget_credentials(tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["local_model"] == "qwen3:14b"
