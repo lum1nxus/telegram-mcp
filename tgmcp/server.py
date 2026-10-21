@@ -15,9 +15,12 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from tgmcp.config import Settings
-from tgmcp.gateway import Gateway, GatewayError, as_utc
+from tgmcp.expand import MAX_QUERIES, MAX_QUERIES_GLOBAL, plan
+from tgmcp.gateway import Busy, Gateway, GatewayError, as_utc
 from tgmcp.models import (
     LIST_BUDGET,
+    NOTHING_FOR_ONE_QUERY,
+    NOTHING_FOR_QUERIES,
     RESULT_BUDGET,
     SEARCH_NOTE,
     Chat,
@@ -25,6 +28,7 @@ from tgmcp.models import (
     Kind,
     Message,
     Page,
+    QueryTried,
     SearchResult,
     Topic,
     cap_text,
@@ -48,6 +52,11 @@ INSTRUCTIONS = (
     "nothing exists. Chats the account owner chose to hide are never shown. " + DATA_SENTENCE
 )
 ANNOTATIONS = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# Cascade steps whose hits end the search; compounds are different words, so they all run.
+STOP_ON_HITS = frozenset({"exact", "pair", "single", "variant"})
+
+# One Telegram query: the visible hits and whether the page was full (more may exist).
+RunQuery = Callable[[str], Awaitable[tuple[list[Message], bool]]]
 
 
 @dataclass
@@ -71,9 +80,12 @@ def guarded[**P, R](
             except (Ambiguous, NotFound, GatewayError) as e:
                 raise ToolError(str(e)) from e
             except TimeoutError as e:
-                raise ToolError(
-                    f"{tool_name} took longer than 30 seconds; try a smaller limit."
-                ) from e
+                hint = (
+                    "expand=false or a smaller limit"
+                    if tool_name == "search_messages"
+                    else "a smaller limit"
+                )
+                raise ToolError(f"{tool_name} took longer than 30 seconds; try {hint}.") from e
 
         return wrapper
 
@@ -125,6 +137,44 @@ async def _resolve(app: AppContext, chat: str) -> Chat:
     return await app.directory.resolve(chat)
 
 
+@dataclass
+class _Found:
+    hits: list[Message]
+    truncated: bool
+    tried: list[QueryTried]
+    busy: str | None = None  # the flood-wait sentence when Telegram stopped the cascade
+
+
+async def _cascade(run: RunQuery, steps: tuple[tuple[str, str], ...], limit: int) -> _Found:
+    """Run the plan's queries in order; merge the hits by (chat_id, id), newest first."""
+    merged: dict[tuple[int, int], Message] = {}
+    tried: list[QueryTried] = []
+    sent: set[str] = set()
+    full = False
+    for label, query in steps:
+        if query in sent:
+            continue
+        sent.add(query)
+        try:
+            hits, page_full = await run(query)
+        except Busy as e:
+            if not merged:
+                queries = ", ".join([*(t.query for t in tried), query])
+                raise ToolError(f"{str(e).rstrip('.')}; tried: {queries}.") from e
+            return _Found(_newest(merged, limit), True, tried, str(e))
+        tried.append(QueryTried(query=query, hits=len(hits)))
+        full = full or page_full
+        for m in hits:
+            merged.setdefault((m.chat_id, m.id), m)
+        if hits and label in STOP_ON_HITS:
+            break
+    return _Found(_newest(merged, limit), full or len(merged) > limit, tried)
+
+
+def _newest(merged: dict[tuple[int, int], Message], limit: int) -> list[Message]:
+    return sorted(merged.values(), key=lambda m: (m.date, m.id), reverse=True)[:limit]
+
+
 async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
     app: AppContext,
     query: str,
@@ -134,35 +184,59 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
     since: date | None,
     until: date | None,
     limit: int,
+    expand: bool,
 ) -> SearchResult:
     if chat is None and (sender is not None or topic is not None):
         raise ToolError("sender and topic need a chat.")
     if chat is None and not query.strip():
         raise ToolError("Global search needs a query.")
     _check_range(since, until)
+    run: RunQuery
     if chat is None:
         scope = "all chats"
-        found = await app.gateway.search_global(query, since=since, until=until, limit=limit)
         visible = {c.id for c in await app.directory.chats()}
-        hits = [m for m in found.messages if m.chat_id in visible]
-        full = len(found.messages) == limit or found.stopped_early
+
+        async def run(q: str) -> tuple[list[Message], bool]:
+            found = await app.gateway.search_global(q, since=since, until=until, limit=limit)
+            # Hidden chats are dropped before anything is counted; the flag keeps the raw page.
+            hits = [m for m in found.messages if m.chat_id in visible]
+            return hits, len(found.messages) == limit or found.stopped_early
+
+        budget = MAX_QUERIES_GLOBAL
     else:
         target = await _resolve(app, chat)
         _check_topic(target, topic)
         scope = target.title  # a data field, like the hits
-        hits = await app.gateway.search_in_chat(
-            target.id, query, topic=topic, sender=sender, since=since, until=until, limit=limit
-        )
-        full = len(hits) == limit
-    kept, cut = fit_budget([_capped(m) for m in hits])
+
+        async def run(q: str) -> tuple[list[Message], bool]:
+            hits = await app.gateway.search_in_chat(
+                target.id, q, topic=topic, sender=sender, since=since, until=until, limit=limit
+            )
+            return hits, len(hits) == limit
+
+        budget = MAX_QUERIES
+    steps = plan(query, budget=budget).steps if expand else ()
+    if steps:
+        found = await _cascade(run, steps, limit)
+    else:  # expand=False, or an empty query with a chat: one search as written
+        hits, full = await run(query)
+        found = _Found(hits, full, [])
+    kept, cut = fit_budget([_capped(m) for m in found.hits])
+    note = SEARCH_NOTE
+    if found.busy:
+        note += " " + found.busy
+    elif not kept and found.tried:
+        n = len(found.tried)
+        note += " " + (NOTHING_FOR_ONE_QUERY if n == 1 else NOTHING_FOR_QUERIES.format(n=n))
     return SearchResult(
         query=query,
         scope=scope,
         since=since,
         until=until,
         hits=kept,
-        truncated=full or cut,
-        note=SEARCH_NOTE,
+        truncated=found.truncated or cut,
+        note=note,
+        queries_tried=found.tried,
     )
 
 
@@ -286,7 +360,9 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         description=describe(
             "Search messages by words, in one chat or in all chats. Telegram matches the "
             "beginnings of words. `sender` (a user id or @username) and `topic` need a chat; "
-            "`since` and `until` are dates."
+            "`since` and `until` are dates. The server tries word stems, the other script, "
+            "Polish without diacritics and common compounds before giving up; pass "
+            "expand=false for one exact search."
         ),
         annotations=ANNOTATIONS,
     )
@@ -300,8 +376,9 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         since: date | None = None,
         until: date | None = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 30,
+        expand: bool = True,
     ) -> SearchResult:
-        return await _search(_app(ctx), query, chat, topic, sender, since, until, limit)
+        return await _search(_app(ctx), query, chat, topic, sender, since, until, limit, expand)
 
     @mcp.tool(
         name="get_messages",

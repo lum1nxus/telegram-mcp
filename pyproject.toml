@@ -8,7 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 # Telethon is pinned to the minor version the read-only guard was checked against: it overrides
 # the private TelegramClient._call and uses Message._finish_init.
-dependencies = ["telethon>=1.45,<1.46", "mcp>=2.3,<3"]
+dependencies = ["telethon>=1.45,<1.46", "mcp>=2.3,<3", "snowballstemmer>=3.1,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
@@ -49,6 +49,8 @@ max-args = 6
 "tests/*" = ["PLR2004"]
 "tgmcp/host/benchdata.py" = ["PLR2004", "RUF001"]  # fixture data: Cyrillic text, seed ids
 "check.py" = ["T20"]
+"tgmcp/expand.py" = ["RUF001", "RUF002", "RUF003"]  # Cyrillic word lists and examples
+"tests/test_expand.py" = ["RUF001", "RUF003"]  # Cyrillic queries
 "tgmcp/cli.py" = ["T20"]
 
 [tool.mypy]
@@ -57,7 +59,7 @@ python_version = "3.12"
 files = ["tgmcp", "tests", "check.py"]
 
 [[tool.mypy.overrides]]
-module = "telethon.*"
+module = ["telethon.*", "snowballstemmer.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

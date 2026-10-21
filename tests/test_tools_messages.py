@@ -1,4 +1,6 @@
-from datetime import timedelta
+# ruff: noqa: RUF001 - Russian seed text has one-letter Cyrillic words
+import asyncio
+from datetime import date, timedelta
 from typing import Any
 
 from mcp import Client
@@ -6,9 +8,10 @@ from mcp import Client
 from tests.conftest import _NOW, Call
 from tests.factories import make_chat, make_message, make_topic
 from tests.fake_gateway import FakeGateway
+from tgmcp import server
 from tgmcp.config import Settings
-from tgmcp.gateway import History, Hits
-from tgmcp.models import RESULT_BUDGET, SEARCH_NOTE
+from tgmcp.gateway import Busy, History, Hits
+from tgmcp.models import NOTHING_FOR_ONE_QUERY, NOTHING_FOR_QUERIES, RESULT_BUDGET, SEARCH_NOTE
 from tgmcp.server import build_server
 
 
@@ -340,3 +343,313 @@ async def test_context_drops_only_from_before_when_after_is_empty(settings: Sett
     assert data["truncated"] is True
     kept = [m["id"] for m in data["before"]]
     assert kept == list(range(100 - len(kept), 100))  # the oldest went first; the nearest stay
+
+
+# --- the search cascade -----------------------------------------------------------------------
+
+EXPAND_SENTENCE = (
+    "The server tries word stems, the other script, Polish without diacritics and common "
+    "compounds before giving up; pass expand=false for one exact search."
+)
+
+
+def _one_chat(*texts: str) -> FakeGateway:
+    """Chat -2009 "Plot" with the texts as messages 1.. (the higher id is the newer one)."""
+    return FakeGateway(
+        [make_chat(-2009, title="Plot")],
+        {
+            -2009: [
+                make_message(n, chat_id=-2009, date=_NOW - timedelta(hours=10 - n), text=text)
+                for n, text in enumerate(texts, start=1)
+            ]
+        },
+    )
+
+
+async def _search(gateway: FakeGateway, settings: Settings, **arguments: Any) -> Any:
+    async with Client(build_server(gateway, settings)) as client:
+        return await client.call_tool("search_messages", arguments)
+
+
+def _tried(data: dict[str, Any]) -> list[tuple[str, int]]:
+    return [(q["query"], q["hits"]) for q in data["queries_tried"]]
+
+
+def _busy_on(gateway: FakeGateway, monkeypatch: Any, name: str, call_number: int) -> None:
+    """The `call_number`-th call (from 1) of the gateway's search method `name` raises Busy."""
+    original = getattr(gateway, name)
+    count = 0
+
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        nonlocal count
+        count += 1
+        if count == call_number:
+            raise Busy(30)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, name, wrapped)
+
+
+async def test_search_description_names_the_cascade(client: Client) -> None:
+    async with client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    search = tools["search_messages"]
+    assert EXPAND_SENTENCE in (search.description or "")
+    assert search.input_schema["properties"]["expand"]["default"] is True
+    assert list(search.input_schema["properties"])[-1] == "expand"
+
+
+async def test_expanded_search_finds_other_forms(settings: Settings) -> None:
+    gateway = _one_chat("Tomek угостил фруктом соседей", "погода")
+    result = await _search(gateway, settings, query="фруктовая компания", chat="Plot")
+    data = result.structured_content or {}
+    assert [h["id"] for h in data["hits"]] == [1]
+    assert _tried(data) == [("фрукт компан", 0), ("фрукт", 1)]
+    assert data["query"] == "фруктовая компания"
+    assert data["note"] == SEARCH_NOTE
+    assert data["truncated"] is False
+
+
+async def test_compound_is_found_after_single_misses(settings: Settings) -> None:
+    gateway = _one_chat("взяли автотрактор у Tomka")
+    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    data = result.structured_content or {}
+    assert [h["id"] for h in data["hits"]] == [1]
+    tried = _tried(data)
+    assert tried[:3] == [("трактор", 0), ("traktor", 0), ("автотрактор", 1)]
+    assert len(tried) == 6  # compounds keep going within the budget
+    assert gateway.calls.count("search_in_chat") == 6
+
+
+async def test_other_script_variant(settings: Settings) -> None:
+    gateway = _one_chat("traktor bez problemu")
+    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    data = result.structured_content or {}
+    assert [h["text"] for h in data["hits"]] == ["traktor bez problemu"]
+    assert _tried(data) == [("трактор", 0), ("traktor", 1)]  # a hit before compounds stops it
+
+
+async def test_polish_without_diacritics(call: Call) -> None:
+    result = await call("search_messages", {"query": "odmowila", "chat": "Garden Club"})
+    data = result.structured_content or {}
+    assert [h["text"] for h in data["hits"]] == ["Zielona firma odmówiła"]
+    assert _tried(data) == [("odmowil", 1)]
+
+
+async def test_expand_false_is_one_exact_search(call: Call, seed: FakeGateway) -> None:
+    result = await call(
+        "search_messages",
+        {"query": "фруктовая компания", "chat": "Garden Club", "expand": False},
+    )
+    data = result.structured_content or {}
+    assert data["hits"] == []
+    assert data["queries_tried"] == []
+    assert data["note"] == SEARCH_NOTE
+    assert seed.calls.count("search_in_chat") == 1
+
+
+async def test_budget_and_dedup(call: Call, seed: FakeGateway) -> None:
+    result = await call("search_messages", {"query": "фруктовая компания", "chat": "-1001"})
+    data = result.structured_content or {}
+    queries = [q for q, _ in _tried(data)]
+    assert len(queries) == 6
+    assert len(set(queries)) == len(queries)
+    assert all(hits == 0 for _, hits in _tried(data))
+    assert data["note"] == SEARCH_NOTE + " " + NOTHING_FOR_QUERIES.format(n=6)
+    assert NOTHING_FOR_QUERIES == (
+        "Nothing found for any of the {n} queries tried; see queries_tried."
+    )
+    result = await call("search_messages", {"query": "погодная станция"})
+    data = result.structured_content or {}
+    assert len(_tried(data)) == 4
+    assert seed.calls.count("search_global") == 4
+
+
+async def test_repeated_words_are_one_query(call: Call, seed: FakeGateway) -> None:
+    result = await call("search_messages", {"query": "granite granite", "chat": "-1001"})
+    data = result.structured_content or {}
+    assert _tried(data) == [("granit", 1)]
+    assert seed.calls.count("search_in_chat") == 1
+
+
+async def test_hidden_hits_do_not_count(call: Call) -> None:
+    result = await call("search_messages", {"query": "secret"})
+    data = result.structured_content or {}
+    assert data["hits"] == []
+    tried = _tried(data)
+    assert tried[0] == ("secret", 0)  # its only hit is in the hidden chat
+    assert len(tried) == 4  # so the cascade went on
+    assert "Private" not in _text(result)
+    assert "-1007" not in _text(result)
+    result = await call("search_messages", {"query": "granite"})
+    data = result.structured_content or {}
+    assert _tried(data) == [("granit", 1)]  # the hidden hit is not counted
+
+
+async def test_busy_before_any_hit_is_an_error_naming_the_queries(
+    call: Call, seed: FakeGateway, monkeypatch: Any
+) -> None:
+    _busy_on(seed, monkeypatch, "search_in_chat", 2)
+    result = await call("search_messages", {"query": "фруктовая компания", "chat": "Garden Club"})
+    assert result.is_error
+    text = _text(result)
+    assert "Telegram asks to wait 30 seconds" in text
+    assert text.endswith("tried: фрукт компан, фрукт.")
+
+
+async def test_busy_on_the_first_global_query(
+    call: Call, seed: FakeGateway, monkeypatch: Any
+) -> None:
+    _busy_on(seed, monkeypatch, "search_global", 1)
+    result = await call("search_messages", {"query": "фрукт"})
+    assert result.is_error
+    assert _text(result).endswith("tried: фрукт.")
+
+
+async def test_busy_after_a_hit_returns_the_hits_so_far(
+    settings: Settings, monkeypatch: Any
+) -> None:
+    gateway = _one_chat("взяли автотрактор у Tomka")
+    _busy_on(gateway, monkeypatch, "search_in_chat", 4)  # the compound after "автотрактор"
+    result = await _search(gateway, settings, query="трактор", chat="Plot")
+    assert not result.is_error
+    data = result.structured_content or {}
+    assert [h["id"] for h in data["hits"]] == [1]
+    assert data["truncated"] is True
+    assert _tried(data) == [("трактор", 0), ("traktor", 0), ("автотрактор", 1)]
+    assert data["note"] == SEARCH_NOTE + " " + str(Busy(30))
+
+
+async def test_merge_dedups_and_limits(settings: Settings) -> None:
+    texts = ("автотрактор", "микротрактор", "автотрактор и микротрактор")
+    result = await _search(_one_chat(*texts), settings, query="трактор", chat="Plot", limit=5)
+    data = result.structured_content or {}
+    assert [h["id"] for h in data["hits"]] == [3, 2, 1]  # each hit once, newest first
+    assert ("автотрактор", 2) in _tried(data)
+    assert ("микротрактор", 2) in _tried(data)
+    assert data["truncated"] is False
+    result = await _search(_one_chat(*texts), settings, query="трактор", chat="Plot", limit=2)
+    data = result.structured_content or {}
+    assert [h["id"] for h in data["hits"]] == [3, 2]
+    assert data["truncated"] is True
+
+
+async def test_a_full_page_in_one_step_is_truncated(settings: Settings) -> None:
+    gateway = _one_chat("трактор раз", "трактор два")
+    result = await _search(gateway, settings, query="трактор", chat="Plot", limit=2)
+    data = result.structured_content or {}
+    assert ([h["id"] for h in data["hits"]], data["truncated"]) == ([2, 1], True)
+    assert _tried(data) == [("трактор", 2)]
+
+
+async def test_steps_keep_the_filters(settings: Settings) -> None:
+    gateway = _one_chat("взяли автотрактор у Tomka")
+    day = (_NOW - timedelta(days=3)).date().isoformat()
+    result = await _search(gateway, settings, query="трактор", chat="Plot", since=day, until=day)
+    data = result.structured_content or {}
+    assert data["hits"] == []
+    assert len(_tried(data)) == 6
+
+
+async def test_empty_query_in_a_chat_is_one_search(call: Call, seed: FakeGateway) -> None:
+    result = await call("search_messages", {"query": "", "chat": "-1009", "sender": "555"})
+    assert result.is_error  # 555 is not a user of the dialog list: the gateway's sentence
+    assert seed.calls.count("search_in_chat") == 1
+
+
+async def test_another_form_on_the_seed(call: Call) -> None:
+    result = await call("search_messages", {"query": "теплицы", "chat": "Garden Club"})
+    data = result.structured_content or {}
+    assert [h["text"] for h in data["hits"]] == ["Tomek поделился теплицей с соседями"]
+    assert _tried(data) == [("теплиц", 1)]  # the stem finds "теплицей"; nothing else is tried
+
+
+async def test_compound_on_the_seed(call: Call) -> None:
+    result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
+    data = result.structured_content or {}
+    assert [h["text"] for h in data["hits"]] == ["взяли минитрактор у Tomka"]
+    assert _tried(data) == [  # compounds keep going after the hit, within the budget
+        ("трактор", 0),
+        ("traktor", 0),
+        ("автотрактор", 0),
+        ("микротрактор", 0),
+        ("минитрактор", 1),
+        ("макротрактор", 0),
+    ]
+
+
+async def test_one_query_tried_is_singular(call: Call) -> None:
+    result = await call("search_messages", {"query": "@nobody_here", "chat": "Garden Club"})
+    data = result.structured_content or {}
+    assert _tried(data) == [("@nobody_here", 0)]
+    assert data["note"] == SEARCH_NOTE + " " + NOTHING_FOR_ONE_QUERY
+    assert NOTHING_FOR_ONE_QUERY == "Nothing found for the 1 query tried; see queries_tried."
+
+
+async def test_every_step_gets_the_same_filters(
+    call: Call, seed: FakeGateway, monkeypatch: Any
+) -> None:
+    recorded: list[dict[str, Any]] = []
+    in_chat, in_all = seed.search_in_chat, seed.search_global
+
+    async def record_chat(chat_id: int, query: str, **kwargs: Any) -> Any:
+        recorded.append(kwargs)
+        return await in_chat(chat_id, query, **kwargs)
+
+    async def record_all(query: str, **kwargs: Any) -> Any:
+        recorded.append(kwargs)
+        return await in_all(query, **kwargs)
+
+    monkeypatch.setattr(seed, "search_in_chat", record_chat)
+    monkeypatch.setattr(seed, "search_global", record_all)
+    window = {"since": "2026-10-01", "until": "2026-10-21", "limit": 7}
+    await call(
+        "search_messages",
+        {"query": "погодная", "chat": "-1005", "topic": 1, "sender": "111", **window},
+    )
+    assert len(recorded) == 6
+    expected = {
+        "topic": 1,
+        "sender": "111",
+        "since": date(2026, 10, 1),
+        "until": date(2026, 10, 21),
+        "limit": 7,
+    }
+    assert all(kwargs == expected for kwargs in recorded)
+    recorded.clear()
+    await call("search_messages", {"query": "погодная", **window})
+    assert len(recorded) == 4
+    assert all(
+        kwargs == {k: expected[k] for k in ("since", "until", "limit")} for kwargs in recorded
+    )
+
+
+async def test_empty_query_with_a_known_sender_lists_their_messages(
+    call: Call, seed: FakeGateway
+) -> None:
+    seed.messages[111] = [make_message(1, chat_id=111, sender_id=111, text="see you")]
+    result = await call("search_messages", {"query": "", "chat": "Nora", "sender": "111"})
+    data = result.structured_content or {}
+    assert [h["text"] for h in data["hits"]] == ["see you"]
+    assert data["queries_tried"] == []
+
+
+async def test_search_timeout_suggests_expand_false(
+    call: Call, seed: FakeGateway, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(server, "TOOL_TIMEOUT_S", 0.01)
+    original = seed.search_in_chat
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.1)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(seed, "search_in_chat", slow)
+    result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
+    assert result.is_error
+    assert _text(result).endswith(
+        "search_messages took longer than 30 seconds; try expand=false or a smaller limit."
+    )
+    monkeypatch.setattr(seed, "history", slow)
+    result = await call("get_messages", {"chat": "Garden Club"})
+    assert _text(result).endswith("get_messages took longer than 30 seconds; try a smaller limit.")
