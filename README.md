@@ -202,17 +202,17 @@ There are two ways. **LM Studio** is a program with a chat window, like the Clau
 
 Only the answer is printed. Useful options:
 
-- `--model gemma4:12b`: another installed model. Without it tgmcp takes `local_model` from `config.json` (or the variable `TGMCP_LOCAL_MODEL`), else the first model Ollama lists. To make a model the default, add `"local_model": "qwen3.5:9b"` to `config.json`.
+- `--model gemma4:12b`: another installed model. Without it tgmcp takes `local_model` from `config.json` (or the variable `TGMCP_LOCAL_MODEL`), else the first model Ollama lists. To make a model the default, add `"local_model": "qwen3.5:9b"` to `config.json` (inside the braces, with a comma after the entry before it, so the file stays valid JSON).
 - `--show-calls`: also print each tool call and the size of its answer, for example `-> search_messages(query="boots") 2311 chars`. "cut" means tgmcp shortened a long answer before passing it to the model.
-- `--backend lmstudio`: use LM Studio's server instead of Ollama (start it in LM Studio's Developer tab first).
+- `--backend lmstudio`: use LM Studio's server instead of Ollama (start it in LM Studio's Developer tab first). `--think` works with Ollama only.
 - `--think`: let the model think before answering (slower, sometimes better).
-- `--max-steps 8`: how many times the model may turn to the tools before it must answer.
+- `--max-steps 8`: how many times the model may be called; when the limit is reached, the run stops unfinished.
 
 If the model does not finish, tgmcp prints `(unfinished after N steps)` and what the model had found so far. Ask a narrower question (one chat, a shorter period).
 
 ### What "local only" checks, and what it cannot see
 
-`tgmcp ask` and `tgmcp bench` refuse to talk to anything but this computer: the address must be `http://127.0.0.1`, `http://localhost` or `http://[::1]` (any port), system proxies are bypassed and a redirect to another address is refused. There is no option to turn this off. Ollama can also run "cloud" models that only look local (their names end in `-cloud`); tgmcp refuses those by name, and also when Ollama cannot tell the model's size and quantization, which a cloud model does not have.
+`tgmcp ask` and `tgmcp bench` refuse to talk to anything but this computer: the address must be `http://127.0.0.1`, `http://localhost` or `http://[::1]` (any port), system proxies are bypassed and a redirect to another address is refused. There is no option to turn this off. Ollama can also run "cloud" models that only look local (their names end in `-cloud`); tgmcp refuses those by name, and also when Ollama cannot tell the model's size and quantization, which a cloud model does not have. With `--backend lmstudio` the address check is the whole local-only rule: LM Studio's server does not say where a model runs, so tgmcp cannot check the model itself.
 
 What tgmcp cannot see:
 

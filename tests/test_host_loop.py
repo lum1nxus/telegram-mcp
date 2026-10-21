@@ -153,6 +153,7 @@ async def test_unknown_tool_twice_in_a_row_ends_the_run(server: MCPServer) -> No
     assert run.finished is False
     assert run.answer == "trying"
     assert len(backend.seen) == 2
+    assert run.turns == 2
     assert run.messages[-1]["content"] == CORRECTION
 
 
@@ -177,6 +178,7 @@ async def test_max_steps_reached(server: MCPServer) -> None:
     assert run.finished is False
     assert run.answer == "partial"
     assert len(backend.seen) == 3
+    assert run.turns == 3
 
 
 async def test_no_text_and_unfinished_gives_none(server: MCPServer) -> None:

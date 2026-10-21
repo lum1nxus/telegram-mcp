@@ -42,6 +42,7 @@ class RunResult:
     finished: bool
     messages: list[dict[str, Any]]
     seconds: float = 0.0
+    turns: int = 0  # model calls made; `max_steps` caps them
 
 
 @dataclass
@@ -51,12 +52,12 @@ class _Run:
     messages: list[dict[str, Any]]
     steps: list[Step] = field(default_factory=list)
     last_text: str | None = None
+    turns: int = 0
     started: float = field(default_factory=time.perf_counter)
 
     def result(self, answer: str | None, *, finished: bool) -> RunResult:
-        return RunResult(
-            answer, self.steps, finished, self.messages, time.perf_counter() - self.started
-        )
+        seconds = time.perf_counter() - self.started
+        return RunResult(answer, self.steps, finished, self.messages, seconds, self.turns)
 
 
 def mcp_tools_for_model(tools: list[Tool]) -> list[dict[str, Any]]:
@@ -148,6 +149,7 @@ async def run_question(
         bad_turns = 0
         for _ in range(max_steps):
             turn = await backend.chat(state.messages, tools)
+            state.turns += 1
             state.messages.append(_assistant(turn))
             if turn.text:
                 state.last_text = turn.text

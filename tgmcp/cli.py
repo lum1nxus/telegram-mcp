@@ -25,7 +25,7 @@ from tgmcp.config import (
     save_credentials,
 )
 from tgmcp.gateway import MIGRATE, NO_TERMINAL, ApiKeyError, GatewayError, NotLoggedIn
-from tgmcp.host.backends import BackendError, ChatBackend, RemoteRefused, make_backend
+from tgmcp.host.backends import BackendError, ChatBackend, ModelTurn, RemoteRefused, make_backend
 from tgmcp.host.benchdata import BENCH_HIDDEN_CHATS, QUESTIONS, SMOKE_IDS, Question, build_seed
 from tgmcp.host.loop import DEFAULT_MAX_STEPS, RunResult, Step, run_question
 from tgmcp.host.scorer import Score, score, table
@@ -215,10 +215,22 @@ def _call_line(step: Step, *, size: bool) -> str:
     return line
 
 
+_KNOWN = (BackendError, RemoteRefused, GatewayError)
+_GONE = "is not running at"  # the backend's unreachable sentence: the bench stops
+
+
+def _innermost(exc: BaseException) -> list[BaseException]:
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for inner in exc.exceptions for leaf in _innermost(inner)]
+    return [exc]
+
+
 def _first_cause(exc: BaseException) -> BaseException:
-    """The first exception inside the task groups the MCP client wraps errors in."""
-    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
-        exc = exc.exceptions[0]
+    """The error inside the task groups the MCP client wraps errors in: the only leaf, or the
+    first when every leaf is one of ours; otherwise the group itself, to be raised as it is."""
+    errors = _innermost(exc)
+    if len(errors) == 1 or (errors and all(isinstance(leaf, _KNOWN) for leaf in errors)):
+        return errors[0]
     return exc
 
 
@@ -249,7 +261,7 @@ def _ask_command(args: argparse.Namespace) -> int:
     if run.finished:
         _say(run.answer or "")
         return 0
-    _say(f"(unfinished after {len(run.steps)} steps)")
+    _say(f"(unfinished after {run.turns} steps)")
     if run.answer:
         _say(run.answer)
     else:
@@ -287,6 +299,24 @@ def _bench_settings() -> Settings:
     )
 
 
+class _Recorder:
+    """Passes calls to the backend and keeps the loop's message list, so a run that raises
+    still errors its messages so far for the JSON log."""
+
+    def __init__(self, backend: ChatBackend) -> None:
+        self.backend = backend
+        self.name = backend.name
+        self.model = backend.model
+        self.messages: list[dict[str, Any]] = []
+
+    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelTurn:
+        self.messages = messages  # the loop's own list, which grows in place
+        return await self.backend.chat(messages, tools)
+
+    async def check_model(self) -> None:
+        await self.backend.check_model()
+
+
 async def _bench_one(
     question: Question, number: int, backend: ChatBackend, max_steps: int
 ) -> _BenchRun:
@@ -294,27 +324,35 @@ async def _bench_one(
     titles = {chat.title for chat in seed.chats}
     ids = {chat.id for chat in seed.chats}
     server = build_server(seed, _bench_settings())  # the fake gateway: never Telethon
+    recorder = _Recorder(backend)
     started = time.perf_counter()
     try:
-        run = await run_question(question.text, backend, server, max_steps=max_steps)
+        run = await run_question(question.text, recorder, server, max_steps=max_steps)
     except Exception as raised:  # one broken run is scored zero; the bench goes on
         exc = _first_cause(raised)
         seconds = time.perf_counter() - started
         zero = Score(False, False, False, False, steps=0, cuts=0, seconds=seconds)
         failure = str(exc) if isinstance(exc, BackendError) else None
-        return _BenchRun(question, number, zero, [], type(exc).__name__, failure)
+        if failure is None:
+            _complain(f"{question.id} run {number}: {type(exc).__name__}")
+        return _BenchRun(question, number, zero, recorder.messages, type(exc).__name__, failure)
     return _BenchRun(question, number, score(question, run, titles, ids), run.messages)
 
 
 async def _bench(
     backend: ChatBackend, questions: list[Question], repeat: int, max_steps: int
-) -> list[_BenchRun]:
+) -> tuple[list[_BenchRun], str | None]:
+    """Every run in order, and the sentence that stopped the bench early when the backend went
+    away (that run is dropped: it says nothing about the model)."""
     await backend.check_model()
-    return [
-        await _bench_one(question, number, backend, max_steps)
-        for question in questions
-        for number in range(1, repeat + 1)
-    ]
+    runs: list[_BenchRun] = []
+    for question in questions:
+        for number in range(1, repeat + 1):
+            run = await _bench_one(question, number, backend, max_steps)
+            if run.backend_failure is not None and _GONE in run.backend_failure:
+                return runs, run.backend_failure
+            runs.append(run)
+    return runs, None
 
 
 def _bench_command(args: argparse.Namespace) -> int:
@@ -322,7 +360,7 @@ def _bench_command(args: argparse.Namespace) -> int:
     questions = [q for q in QUESTIONS if chosen is None or q.id in chosen]
     try:
         backend = make_backend(args.backend, args.model, args.url, think=args.think)
-        runs = asyncio.run(_bench(backend, questions, args.repeat, DEFAULT_MAX_STEPS))
+        runs, stopped = asyncio.run(_bench(backend, questions, args.repeat, DEFAULT_MAX_STEPS))
     except (RemoteRefused, BackendError) as exc:
         _complain(str(exc))
         return 1
@@ -333,11 +371,18 @@ def _bench_command(args: argparse.Namespace) -> int:
     # Every run is a row: a percentage over N runs per question is the mean of its flags.
     _say(table([(run.question, run.score) for run in runs], header))
     if args.json is not None:
-        Path(args.json).write_text(
-            json.dumps([run.as_json() for run in runs], ensure_ascii=False, indent=1, default=str),
-            encoding="utf-8",
-        )
-    failures = list(dict.fromkeys(r.backend_failure for r in runs if r.backend_failure))
+        try:
+            Path(args.json).write_text(
+                json.dumps(
+                    [run.as_json() for run in runs], ensure_ascii=False, indent=1, default=str
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            _complain(f"Cannot write {args.json}: {exc.strerror or exc}.")
+            return 1
+    failures = [r.backend_failure for r in runs if r.backend_failure]
+    failures = list(dict.fromkeys([*failures, *([stopped] if stopped else [])]))
     for sentence in failures:
         _complain(sentence)
     return 1 if failures else 0
@@ -405,6 +450,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return commands[args.command]()
     except KeyboardInterrupt:
+        return 0 if args.command == "serve" else 130
+    except BaseExceptionGroup as group:  # Ctrl-C inside the MCP client's task groups
+        if group.subgroup(KeyboardInterrupt) is None:
+            raise
         return 0 if args.command == "serve" else 130
 
 
