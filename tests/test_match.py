@@ -170,6 +170,17 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         # refused although harmless (accepted cost of the heuristic)
         "(a+)?",
         "((a|b)c)+",
+        # runs seen through unquantified groups
+        "(.*)(.*)цена",
+        "(.*)(.*)=",
+        "(?:.*)(?:.*)=",
+        "(a*)(a*)b",
+        "(?:x*)x*=",
+        "x*()x*=",
+        # an optional atom does not break a run
+        "a*b?a*c",
+        "x*(y)?x*=",
+        r"\w*\s?\w*!",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
@@ -187,6 +198,11 @@ def test_catastrophic_patterns_are_refused(pattern: str) -> None:
         compile_pattern(pattern)
 
 
+@pytest.mark.parametrize("pattern", ["a+.a+.a+c", ".*a.*a.*c", "(?=a+)a*"])
+def test_literal_separated_runs_are_allowed(pattern: str) -> None:
+    compile_pattern(pattern)
+
+
 def test_three_unbounded_quantifiers_are_allowed() -> None:
     compile_pattern("a+-b+-c+")
     compile_pattern(".*-a+-b+-c+")  # the leading .* is stripped before counting
@@ -194,10 +210,12 @@ def test_three_unbounded_quantifiers_are_allowed() -> None:
 
 def test_leading_any_is_stripped() -> None:
     assert compile_pattern(".*abc").pattern == "abc"
+    assert compile_pattern(".*?abc").pattern == "abc"
+    assert compile_pattern("(?s).*abc").pattern == "(?s)abc"
+    assert compile_pattern("(?s).*?теплиц").pattern == "(?s)теплиц"
     assert compile_pattern(".+abc").pattern == ".+abc"  # needs a character before abc
     assert compile_pattern("^.*abc").pattern == "^.*abc"  # first line only: kept
     assert compile_pattern("^.+abc").pattern == "^.+abc"
-    assert compile_pattern(".*?abc").pattern == ".*?abc"  # a lazy prefix is left alone
     compiled = compile_pattern(".*теплиц.*цена")
     assert compiled.pattern == "теплиц.*цена"
     assert regex(compiled, "у нас теплица, цена 100")

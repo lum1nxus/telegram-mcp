@@ -38,7 +38,8 @@ _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
 _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
-_LEADING_ANY = re.compile(r"\.\*(?![*+?{])")
+_LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{])")
+_LOOKAROUND = ("?=", "?!", "?<=", "?<!")
 
 _FOLD_TABLE = str.maketrans(
     {
@@ -179,6 +180,7 @@ class _Group:
 
     items: list["_Item"] = field(default_factory=list)
     alternation: bool = False
+    lookaround: bool = False
 
 
 @dataclass
@@ -200,6 +202,7 @@ def _parse(simple: str, i: int = 0) -> tuple[_Group, int]:
         if c == "(":
             prefix = _GROUP_PREFIX.match(simple, i + 1)
             child, i = _parse(simple, prefix.end() if prefix else i + 1)
+            child.lookaround = prefix is not None and prefix.group().startswith(_LOOKAROUND)
         else:
             group.alternation = group.alternation or c == "|"
             i += 1
@@ -227,9 +230,40 @@ def _is_unbounded(quantifier: str) -> bool:
     return _UNBOUNDED.fullmatch(quantifier) is not None
 
 
+def _run(group: _Group) -> Iterator[str]:
+    """The quantifiers of the group's sequence ("" for none), with plain groups flattened.
+
+    An unquantified group without `|` that is not a lookaround is spliced into the sequence
+    (an empty group vanishes); any other group counts as one atom with its quantifier.
+    """
+    for item in group.items:
+        inner = item.group
+        if (
+            inner is not None
+            and not item.quantifier
+            and not inner.alternation
+            and not inner.lookaround
+        ):
+            yield from _run(inner)
+        else:
+            yield item.quantifier
+
+
+def _has_unbounded_in_a_row(group: _Group) -> bool:
+    """Two unbounded atoms with nothing between them but optional (`?`) atoms."""
+    previous_unbounded = False
+    for quantifier in _run(group):
+        if _is_unbounded(quantifier):
+            if previous_unbounded:
+                return True
+            previous_unbounded = True
+        elif not quantifier.startswith("?"):
+            previous_unbounded = False
+    return False
+
+
 def _is_risky(group: _Group) -> bool:
     """A quantified group holding a quantifier or `|`, or two unbounded atoms in a row."""
-    previous_unbounded = False
     for item in group.items:
         inner = item.group
         if inner is not None and (
@@ -237,11 +271,7 @@ def _is_risky(group: _Group) -> bool:
             or (item.quantifier and (any(_quantifiers(inner)) or _has_alternation(inner)))
         ):
             return True
-        unbounded = _is_unbounded(item.quantifier)
-        if unbounded and previous_unbounded:
-            return True
-        previous_unbounded = unbounded
-    return False
+    return _has_unbounded_in_a_row(group)
 
 
 def _blank(pattern: str) -> str:
@@ -260,15 +290,19 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
       `(a+)+`, `(a?){25}`, `(a{2,10}){2,10}`, `(.*a){20}`, `((ab)+)+` are refused;
     - any quantifier on a group that contains `|`, at any depth: `(a|aa)+`, `(a|ab){2,}` are
       refused (`cena|price` at the top level passes);
-    - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included): `a*a*`, `.*.*`,
-      `\\w+\\w*` are refused;
-    - one bare leading `.*` is stripped: under `search` it changes nothing, so `.*abc`
-      compiles as `abc`; `.+abc`, `^.*abc` and lazy `.*?abc` are kept as given and counted;
+    - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included) are refused:
+      `a*a*`, `.*.*`, `\\w+\\w*`. Unquantified plain groups are seen through (`(.*)(.*)=`,
+      `x*()x*=`) and an optional atom does not break the run (`a*b?a*c`, `x*(y)?x*=`);
+    - one leading `.*` or lazy `.*?`, also right after an inline flag group at the very start,
+      is stripped: under `search` it changes nothing, so `.*abc` and `.*?abc` compile as `abc`
+      and `(?s).*abc` as `(?s)abc`; `.+abc` and `^.*abc` are kept as given and counted;
     - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
     - anything `re` cannot compile is refused.
     Knowingly refused although harmless: an optional group holding a quantifier (`(a+)?`)
     and a quantified group with an alternation nested deeper (`((a|b)c)+`).
-    Knowingly not caught: nested bounded repeats of plain atoms without a group
+    Knowingly not caught: unbounded runs separated by a literal (`a+.a+.a+c`, `.*a.*a.*c`;
+    the count of unbounded quantifiers caps them), a run through an alternation group
+    (`(a*|b)a*`), nested bounded repeats of plain atoms without a group
     (`a{1,30}b?a{1,30}`), overlapping alternation at the top level, and lookarounds, whose
     content is checked like any group but not for what it looks at.
     """
@@ -277,7 +311,7 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     if _BACK_REFERENCE.search(pattern) or _is_risky(_parse(_blank(pattern))[0]):
         raise PatternRefused(_FOREVER)
     leading = _LEADING_ANY.match(pattern)
-    stripped = pattern[leading.end() :] if leading else pattern
+    stripped = (leading.group(1) or "") + pattern[leading.end() :] if leading else pattern
     unbounded = sum(_is_unbounded(q) for q in _quantifiers(_parse(_blank(stripped))[0]))
     if unbounded > MAX_UNBOUNDED:
         raise PatternRefused(_FOREVER)
