@@ -302,7 +302,7 @@ async def test_miss_refreshes_once(seed):       # add a chat to seed after first
 ```python
 async def test_list_chats_default_hides_archived_and_hidden(client):  # ids returned exclude -1006 and -1007
 async def test_list_chats_query_and_kind(client):                     # query="hiking" → 2; kind="channel" → [-1003]
-async def test_get_chat_by_fragment_and_ambiguity(client):            # "Auto" → Chat(-1003, discussion_chat_id=-1004); "hiking" → is_error with both candidates
+async def test_get_chat_by_fragment_and_ambiguity(client):            # "Auto News" → Chat(-1003, discussion_chat_id=-1004); "Auto" and "hiking" → is_error with both candidates
 async def test_list_topics_on_forum_and_on_plain_group(client):       # -1005 → ids [1, 7]; -1001 → is_error "is not a forum group"
 async def test_tool_annotations_and_description_sentence(client):     # every tool in list_tools: read_only_hint True, open_world_hint False, description endswith the sentence
 async def test_not_logged_in_maps_to_tool_error(client, seed):        # seed.raise_next = NotLoggedIn(); list_chats → is_error, text contains "tgmcp login"
