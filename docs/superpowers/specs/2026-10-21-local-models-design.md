@@ -190,9 +190,11 @@ scores. Published numbers (BFCL, Tau2) are listed in the README as pointers only
 
 - Standard-library HTTP, no SDK dependency; streaming not needed for `ask` v1.
 - Local-only without an override flag; cloud-served models refused by name and `/api/show`.
-- Rule-based scoring, no model-as-judge. `no_invention` checks ids and exact chat titles
-  only; dates are not checked in v1 (free-text dates in three languages are not worth the
-  false positives). Recorded as a limitation in the bench table's footer.
+- Rule-based scoring, no model-as-judge. `no_invention` checks chat ids, message ids cited
+  as ids, and the seed's chat titles (case-sensitive, proper nouns); dates and other names
+  are not checked in v1 (free-text dates in three languages are not worth the false
+  positives). Recorded as a limitation in the bench table's footer. Purely numeric answer
+  terms never match inside dates or times.
 - Bench data = the v1 test seed moved into the package (`FakeGateway`, factories and the
   seed become `tgmcp/host/benchdata.py`; the tests import them from there), plus one new
   chat (`-1008`, "Sąsiedzi / Соседи") with ten Russian and Polish messages so the
