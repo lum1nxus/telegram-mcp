@@ -16,9 +16,11 @@ FORBIDDEN = (
     "leave",
     "invite",
     "upload",
+    "action",  # client.action(chat, "typing") sends a chat action
 )
-# Read-only Telethon properties whose names contain a forbidden word (Attribute nodes only).
-ALLOWED_ATTRIBUTES = frozenset({"sender", "sender_id", "forward", "fwd_from"})
+# Read-only names that contain a forbidden word: Telethon properties read as attributes, and
+# `sender`, the keyword the Protocol fixes for search_in_chat (read as a plain name).
+ALLOWED_NAMES = frozenset({"sender", "sender_id", "forward", "fwd_from"})
 PACKAGE = Path(__file__).resolve().parent.parent / "tgmcp"
 
 
@@ -50,19 +52,39 @@ def _getattr_problem(node: ast.Call) -> bool:
     return not (isinstance(name, ast.Constant) and isinstance(name.value, str))
 
 
+def _import_problems(node: ast.Import | ast.ImportFrom) -> list[str]:
+    names = [n for a in node.names for n in (a.name, a.asname or "")]
+    if "*" in names:
+        return [f"line {node.lineno}: star import"]
+    return [f"line {node.lineno}: import {n}" for n in names if is_forbidden(n.rsplit(".", 1)[-1])]
+
+
+def _string_problems(node: ast.Constant) -> list[str]:
+    if not isinstance(node.value, str):
+        return []
+    parts = [part.strip() for part in node.value.split(".")]
+    return [
+        f"line {node.lineno}: {part!r}"
+        for part in parts
+        if part.isidentifier() and is_forbidden(part)
+    ]
+
+
 def _node_problems(node: ast.AST) -> list[str]:
     line = getattr(node, "lineno", 0)
+    name = None
     if isinstance(node, ast.Attribute):
-        if node.attr not in ALLOWED_ATTRIBUTES and is_forbidden(node.attr):
-            return [f"line {line}: .{node.attr}"]
-    elif isinstance(node, ast.Import | ast.ImportFrom):
-        names = [n for a in node.names for n in (a.name, a.asname or "")]
-        return [f"line {line}: import {n}" for n in names if is_forbidden(n.rsplit(".", 1)[-1])]
-    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-        text = node.value.strip()
-        if text.isidentifier() and is_forbidden(text):
-            return [f"line {line}: {text!r}"]
-    elif isinstance(node, ast.Call) and _getattr_problem(node):
+        name = node.attr
+    elif isinstance(node, ast.Name):
+        name = node.id
+    if name is not None:
+        bad = name not in ALLOWED_NAMES and is_forbidden(name)
+        return [f"line {line}: {name}"] if bad else []
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return _import_problems(node)
+    if isinstance(node, ast.Constant):
+        return _string_problems(node)
+    if isinstance(node, ast.Call) and _getattr_problem(node):
         return [f"line {line}: getattr with a computed name"]
     return []
 
@@ -70,9 +92,10 @@ def _node_problems(node: ast.AST) -> list[str]:
 def gateway_violations(source: str) -> list[str]:
     """Every write-shaped name the gateway source touches.
 
-    Checks attribute reads (minus the read-only allowlist), imported names, defined names,
-    identifier-like string constants (the kind a dynamic lookup would use; sentences are not
-    identifiers) and `getattr` calls whose name is not a string constant.
+    Checks attribute reads and plain names (minus the read-only allowlist), imported names and
+    star imports, defined names, identifier-like string constants and their dotted parts (the
+    kind a dynamic lookup would use; sentences are not identifiers) and `getattr` calls whose
+    name is not a string constant.
     """
     tree = ast.parse(source)
     bad = [f"line {line}: def {name}" for line, name in _defined_names(tree) if is_forbidden(name)]
@@ -117,6 +140,10 @@ def test_checker_catches_write_requests():
         "getattr(client, 'send_message')",
         "getattr(client, name)",
         "def markRead(): pass",
+        "from telethon.tl.functions.messages import *",
+        "client(ReadHistoryRequest(peer=p, max_id=0))",
+        "await client.action(chat, 'typing')",
+        "x = 'messages.SendMessageRequest'",
     ]
     for source in cases:
         assert gateway_violations(source), source
@@ -125,7 +152,7 @@ def test_checker_catches_write_requests():
 def test_checker_allows_read_only_properties_and_sentences():
     source = (
         "a = m.sender\nb = m.sender_id\nc = m.forward\nd = m.fwd_from\n"
-        "e = getattr(x, 'username', None)\n"
+        "e = getattr(x, 'username', None)\nf(sender)\n"
         "raise GatewayError('sender must be a user id or @username')\n"
     )
     assert gateway_violations(source) == []

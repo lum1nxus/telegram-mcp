@@ -204,12 +204,6 @@ _FIXED_ERRORS: tuple[tuple[tuple[type[Exception], ...], type[GatewayError], str]
         "That chat is no longer accessible to this account.",
     ),
     ((errors.SearchQueryEmptyError,), GatewayError, "Global search needs a query."),
-    # Telethon raises ValueError when it cannot resolve an entity (here: the sender).
-    (
-        (ValueError,),
-        GatewayError,
-        "Unknown sender: pass a user id or @username from this chat.",
-    ),
 )
 
 
@@ -387,8 +381,7 @@ class TelethonGateway(Gateway):
                 self._start_guard()
                 return
             self._ready = False
-            self._guard = None
-            self._guard_task = None
+            self._stop_guard()
             await self._tg.disconnect()
         log.info("disconnected after idle")
 
@@ -526,7 +519,12 @@ class TelethonGateway(Gateway):
         if re.fullmatch(r"\d+", value):
             return int(value)
         if re.fullmatch(r"@\w+", value):
-            return await client.get_input_entity(value)
+            try:
+                return await client.get_input_entity(value)
+            except ValueError as exc:  # Telethon could not resolve the username
+                raise GatewayError(
+                    "Unknown sender: pass a user id or @username from this chat."
+                ) from exc
         raise GatewayError("sender must be a user id or @username")
 
     async def search_in_chat(  # noqa: PLR0913 - signature fixed by the interface
@@ -589,7 +587,7 @@ class TelethonGateway(Gateway):
     ) -> tuple[list[Message], Message, list[Message]]:
         async with self._session() as client:
             peer = await self._peer(client, chat_id)
-            found = [m async for m in client.iter_messages(peer, ids=[message_id]) if m]
+            found = _plain([m async for m in client.iter_messages(peer, ids=[message_id])])
             if not found:
                 raise GatewayError(f"No message {message_id} in that chat.")
             target = self._map(found[0], chat_id)

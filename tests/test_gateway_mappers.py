@@ -179,8 +179,8 @@ def test_other_errors_are_sentences():
     assert str(rpc) == "Telegram refused the request: RPCError."
     down = map_error(ConnectionError("down"))
     assert str(down) == "Could not talk to Telegram: ConnectionError."
-    unknown = map_error(ValueError("Cannot find any entity corresponding to x"))
-    assert str(unknown) == "Unknown sender: pass a user id or @username from this chat."
+    value = map_error(ValueError("bad"))
+    assert str(value) == "Internal error in the Telegram gateway: ValueError."
     bug = map_error(KeyError("k"))
     assert str(bug) == "Internal error in the Telegram gateway: KeyError."
     same = GatewayError("kept")
