@@ -17,6 +17,7 @@ from pydantic import Field
 from tgmcp.config import Settings
 from tgmcp.gateway import Busy, Gateway, GatewayError, NotLoggedIn
 from tgmcp.models import (
+    RESULT_BUDGET,
     SEARCH_NOTE,
     Chat,
     Context,
@@ -106,6 +107,16 @@ def _filter_chats(
     ]
 
 
+def _check_range(since: date | datetime | None, until: date | datetime | None) -> None:
+    if since is not None and until is not None and since > until:
+        raise ToolError("since must not be after until.")
+
+
+def _check_topic(chat: Chat, topic: int | None) -> None:
+    if topic is not None and not chat.is_forum:
+        raise ToolError(f"{chat.title} is not a forum group.")
+
+
 async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
     app: AppContext,
     query: str,
@@ -120,6 +131,7 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
         raise ToolError("sender and topic need a chat.")
     if chat is None and not query.strip():
         raise ToolError("Global search needs a query.")
+    _check_range(since, until)
     if chat is None:
         scope = "all chats"
         found = await app.gateway.search_global(query, since=since, until=until, limit=limit)
@@ -128,6 +140,7 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
         full = len(found) == limit
     else:
         target = await app.directory.resolve(chat)
+        _check_topic(target, topic)
         scope = target.title
         hits = await app.gateway.search_in_chat(
             target.id, query, topic=topic, sender=sender, since=since, until=until, limit=limit
@@ -154,7 +167,9 @@ async def _history(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
     before_id: int | None,
     limit: int,
 ) -> Page:
+    _check_range(since, until)
     target = await app.directory.resolve(chat)
+    _check_topic(target, topic)
     found = await app.gateway.history(
         target.id, topic=topic, before_id=before_id, since=since, until=until, limit=limit
     )
@@ -166,6 +181,24 @@ async def _history(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
         truncated=cut,
         next_before_id=kept[-1].id if (more or cut) and kept else None,
     )
+
+
+def _fit_context(
+    chat: Chat, target: Message, earlier: list[Message], later: list[Message]
+) -> Context:
+    """Drop the messages farthest from the target until the result fits the budget."""
+    before = [_capped(m) for m in earlier]
+    after = [_capped(m) for m in later]
+    size = len(target.model_dump_json()) + sum(len(m.model_dump_json()) for m in before + after)
+    dropped = False
+    take_before = True
+    while size > RESULT_BUDGET and (before or after):
+        from_before = (take_before and bool(before)) or not after
+        gone = before.pop(0) if from_before else after.pop()
+        take_before = not take_before
+        size -= len(gone.model_dump_json())
+        dropped = True
+    return Context(chat=chat, target=target, before=before, after=after, truncated=dropped)
 
 
 async def _chat_details(app: AppContext, chat: str) -> Chat:
@@ -280,7 +313,7 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
         topic: int | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        before_id: int | None = None,
+        before_id: Annotated[int | None, Field(ge=1)] = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
     ) -> Page:
         return await _history(_app(ctx), chat, topic, since, until, before_id, limit)
@@ -298,21 +331,16 @@ def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Setti
     async def get_message_context(
         ctx: ToolContext[AppContext],
         chat: str,
-        message_id: int,
+        message_id: Annotated[int, Field(ge=1)],
         before: Annotated[int, Field(ge=0, le=30)] = 10,
         after: Annotated[int, Field(ge=0, le=30)] = 10,
     ) -> Context:
         app = _app(ctx)
-        target = await app.directory.resolve(chat)
+        found = await app.directory.resolve(chat)
         earlier, middle, later = await app.gateway.around(
-            target.id, message_id, before=before, after=after
+            found.id, message_id, before=before, after=after
         )
-        full_text = before == 0 and after == 0
-        return Context(
-            chat=target,
-            target=middle if full_text else _capped(middle),
-            before=[_capped(m) for m in earlier],
-            after=[_capped(m) for m in later],
-        )
+        target = middle if before == 0 and after == 0 else _capped(middle)
+        return _fit_context(found, target, earlier, later)
 
     return mcp

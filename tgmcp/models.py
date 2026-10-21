@@ -73,6 +73,7 @@ class Context(BaseModel):
     target: Message
     before: list[Message]
     after: list[Message]
+    truncated: bool = False
 
 
 class Account(BaseModel):
