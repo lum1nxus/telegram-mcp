@@ -8,17 +8,19 @@ Pure and deterministic: no I/O, no state. The scan builds one predicate per call
   й, distinct from и).
 - `fragment` is a folded substring ("трактор" finds "минитрактор").
 - `words` needs every query word to be a whole word of the text, in any order.
-- `tolerance` (ruling 3) compares each query word with whole text words: a trigram Jaccard
-  gate, then Levenshtein. It is clamped by query-word length (ruling 6): up to 3 letters → 0,
-  4-6 letters → at most 1, 7 and more → as given. In `fragment` mode with tolerance > 0 a query
-  word matches a text word that it fuzzy-matches or is an exact substring of; a typo inside a
-  compound is not caught.
+- `tolerance` (ruling 3) compares each query word with whole text words: Levenshtein, with a
+  trigram Jaccard gate in front for words of 7 letters and more. It is clamped by query-word
+  length (ruling 6): up to 3 letters → 0, 4-6 letters → at most 1, 7 and more → as given. A
+  transposition costs 2 edits, so with the clamp a swap of two letters in a 5-6-letter word is
+  never a fuzzy match. In `fragment` mode with tolerance > 0 a query word matches a text word
+  that it fuzzy-matches or is an exact substring of; a typo inside a compound is not caught.
 - `regex` (ruling 4) searches the ORIGINAL text, case-insensitive, on at most 4 096
   characters; `compile_pattern` refuses patterns that could run forever (see its docstring).
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 
 MAX_PATTERN_CHARS = 200
 MAX_TEXT_CHARS = 4096
@@ -26,12 +28,17 @@ MIN_JACCARD = 0.3
 MIN_TRIGRAM_WORD = 2  # shorter words have no trigrams
 SHORT_WORD = 3  # up to this many letters: no tolerance
 MEDIUM_WORD = 6  # up to this many letters: tolerance at most 1
+MAX_TOLERANCE = 2
+MAX_UNBOUNDED = 3  # unbounded quantifiers a pattern may hold
 
 _WORD = re.compile(r"\w+")
 _BACK_REFERENCE = re.compile(r"\\[1-9]|\(\?P=")
 _ESCAPE = re.compile(r"\\.", re.DOTALL)
 _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
-_UNBOUNDED = re.compile(r"[+*]|\{\d*,\}")
+_QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
+_UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
+_GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
+_LEADING_ANY = re.compile(r"\^?\.[*+](?![*+?{])")
 
 _FOLD_TABLE = str.maketrans(
     {
@@ -103,34 +110,51 @@ def clamp_tolerance(word: str, tolerance: int) -> int:
     return tolerance
 
 
-def fuzzy_word(query_word: str, text_word: str, tolerance: int) -> bool:
-    """Whether two folded words are within the clamped tolerance (trigram gate, then edits)."""
-    tol = clamp_tolerance(query_word, tolerance)
-    if tol == 0:
-        return query_word == text_word
-    if abs(len(query_word) - len(text_word)) > tol:
+@dataclass(frozen=True)
+class _QueryWord:
+    """A folded query word prepared once: its clamped tolerance and (when gated) trigrams."""
+
+    word: str
+    tolerance: int
+    grams: frozenset[str]
+
+
+def _prepare(query_words: list[str], tolerance: int) -> list[_QueryWord]:
+    prepared = []
+    for word in query_words:
+        tol = clamp_tolerance(word, tolerance)
+        grams = trigrams(word) if tol and len(word) > MEDIUM_WORD else frozenset()
+        prepared.append(_QueryWord(word, tol, grams))
+    return prepared
+
+
+def _fuzzy(query: _QueryWord, text_word: str) -> bool:
+    if query.tolerance == 0:
+        return query.word == text_word
+    if abs(len(query.word) - len(text_word)) > query.tolerance:
         return False
-    q_grams, t_grams = trigrams(query_word), trigrams(text_word)
-    if q_grams and t_grams:
-        jaccard = len(q_grams & t_grams) / len(q_grams | t_grams)
-        if jaccard < MIN_JACCARD:
+    if query.grams:  # the gate filters only long words; short ones go straight to edits
+        t_grams = trigrams(text_word)
+        if t_grams and len(query.grams & t_grams) / len(query.grams | t_grams) < MIN_JACCARD:
             return False
-    return levenshtein(query_word, text_word, tol) <= tol
+    return levenshtein(query.word, text_word, query.tolerance) <= query.tolerance
 
 
-def _all_words_found(query_words: list[str], text_words: list[str], tolerance: int) -> bool:
-    if not query_words:
+def fuzzy_word(query_word: str, text_word: str, tolerance: int) -> bool:
+    """Whether two folded words are within the clamped tolerance (gate on 7+ letters, edits)."""
+    return _fuzzy(_prepare([query_word], tolerance)[0], text_word)
+
+
+def _all_words_found(query: list[_QueryWord], text_words: set[str]) -> bool:
+    if not query:
         return False
-    if tolerance == 0:
-        present = set(text_words)
-        return all(q in present for q in query_words)
-    return all(any(fuzzy_word(q, t, tolerance) for t in text_words) for q in query_words)
+    return all(q.word in text_words or any(_fuzzy(q, t) for t in text_words) for q in query)
 
 
-def _all_fragments_found(query_words: list[str], text_words: list[str], tolerance: int) -> bool:
-    if not query_words:
+def _all_fragments_found(query: list[_QueryWord], text_words: set[str]) -> bool:
+    if not query:
         return False
-    return all(any(q in t or fuzzy_word(q, t, tolerance) for t in text_words) for q in query_words)
+    return all(any(q.word in t or _fuzzy(q, t) for t in text_words) for q in query)
 
 
 def fragment(query: str, text: str) -> bool:
@@ -141,49 +165,122 @@ def fragment(query: str, text: str) -> bool:
 
 def words(query: str, text: str, tolerance: int = 0) -> bool:
     """Whether every query word matches a whole text word (fuzzy when tolerance > 0)."""
-    return _all_words_found(words_of(query), words_of(text), tolerance)
+    return _all_words_found(_prepare(words_of(query), tolerance), set(words_of(text)))
 
 
 def fragment_fuzzy(query: str, text: str, tolerance: int) -> bool:
     """Whether every query word is a substring of a text word or fuzzy-matches one."""
-    return _all_fragments_found(words_of(query), words_of(text), tolerance)
+    return _all_fragments_found(_prepare(words_of(query), tolerance), set(words_of(text)))
 
 
-def _has_nested_quantifier(pattern: str) -> bool:
-    """Whether a group holding an unbounded quantifier is itself repeated without bound."""
-    simple = _CHAR_CLASS.sub("x", _ESCAPE.sub("x", pattern))
-    stack = [False]  # per open group: does it hold an unbounded quantifier?
-    for i, c in enumerate(simple):
+@dataclass
+class _Group:
+    """A parsed group (or the whole pattern): its items and whether it holds `|`."""
+
+    items: list["_Item"] = field(default_factory=list)
+    alternation: bool = False
+
+
+@dataclass
+class _Item:
+    """One atom or group with its quantifier ("" for none); a `|` is an unquantified item."""
+
+    group: _Group | None
+    quantifier: str
+
+
+def _parse(simple: str, i: int = 0) -> tuple[_Group, int]:
+    """Parse a blanked pattern from `i` up to the `)` that closes the current group."""
+    group = _Group()
+    while i < len(simple):
+        c = simple[i]
+        if c == ")":
+            return group, i + 1
+        child = None
         if c == "(":
-            stack.append(False)
-        elif c == ")" and len(stack) > 1:
-            inner = stack.pop()
-            repeated = _UNBOUNDED.match(simple, i + 1) is not None
-            if inner and repeated:
-                return True
-            stack[-1] = stack[-1] or inner or repeated
-        elif _UNBOUNDED.match(simple, i):
-            stack[-1] = True
+            prefix = _GROUP_PREFIX.match(simple, i + 1)
+            child, i = _parse(simple, prefix.end() if prefix else i + 1)
+        else:
+            group.alternation = group.alternation or c == "|"
+            i += 1
+        quantifier = _QUANTIFIER.match(simple, i) if c != "|" else None
+        group.items.append(_Item(child, quantifier.group() if quantifier else ""))
+        i = quantifier.end() if quantifier else i
+    return group, i
+
+
+def _quantifiers(group: _Group) -> Iterator[str]:
+    for item in group.items:
+        if item.quantifier:
+            yield item.quantifier
+        if item.group is not None:
+            yield from _quantifiers(item.group)
+
+
+def _has_alternation(group: _Group) -> bool:
+    return group.alternation or any(
+        item.group is not None and _has_alternation(item.group) for item in group.items
+    )
+
+
+def _is_unbounded(quantifier: str) -> bool:
+    return _UNBOUNDED.fullmatch(quantifier) is not None
+
+
+def _is_risky(group: _Group) -> bool:
+    """A quantified group holding a quantifier or `|`, or two unbounded atoms in a row."""
+    previous_unbounded = False
+    for item in group.items:
+        inner = item.group
+        if inner is not None and (
+            _is_risky(inner)
+            or (item.quantifier and (any(_quantifiers(inner)) or _has_alternation(inner)))
+        ):
+            return True
+        unbounded = _is_unbounded(item.quantifier)
+        if unbounded and previous_unbounded:
+            return True
+        previous_unbounded = unbounded
     return False
+
+
+def _blank(pattern: str) -> str:
+    """The pattern with escapes and character classes replaced by a plain atom `x`."""
+    return _CHAR_CLASS.sub("x", _ESCAPE.sub("x", pattern))
 
 
 def compile_pattern(pattern: str) -> re.Pattern[str]:
     """Compile a scan pattern with IGNORECASE, refusing what could run forever.
 
-    The guard is a heuristic, not a proof. Refused, in this order:
-    - a pattern longer than `MAX_PATTERN_CHARS` characters;
-    - back-references `\\1`...`\\9` and `(?P=name)`;
-    - nested quantifiers: a group that holds `+`, `*` or `{n,}` (escapes and character
-      classes ignored), itself followed by `+`, `*` or `{n,}`, lazy forms included:
-      `(a+)+`, `(.*)*`, `(x|y*)*`, `((ab)+)+`; `(ab)+` and `(a+)?` pass;
-    - anything `re` cannot compile.
+    The guard is a heuristic, not a proof. Escapes and character classes count as one plain
+    atom, so `\\*`, `[*+]` and `\\(` are not taken for syntax. In this order:
+    - a pattern longer than `MAX_PATTERN_CHARS` characters is refused;
+    - back-references `\\1`...`\\9` and `(?P=name)` are refused;
+    - any quantifier on a group that contains a quantifier, bounded counts and `?` included:
+      `(a+)+`, `(a?){25}`, `(a{2,10}){2,10}`, `(.*a){20}`, `((ab)+)+` are refused;
+    - any quantifier on a group that contains `|`, at any depth: `(a|aa)+`, `(a|ab){2,}` are
+      refused (`cena|price` at the top level passes);
+    - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included): `a*a*`, `.*.*`,
+      `\\w+\\w*` are refused;
+    - one leading `.*`, `.+`, `^.*` or `^.+` is stripped (taken as "anything before" under
+      `search`): `.*abc` compiles as `abc`;
+    - more than `MAX_UNBOUNDED` unbounded quantifiers after the strip are refused;
+    - anything `re` cannot compile is refused.
+    Knowingly not caught: nested bounded repeats of plain atoms without a group
+    (`a{1,30}b?a{1,30}`), overlapping alternation at the top level, and lookarounds, whose
+    content is checked like any group but not for what it looks at.
     """
     if len(pattern) > MAX_PATTERN_CHARS:
         raise PatternRefused(_TOO_LONG)
-    if _BACK_REFERENCE.search(pattern) or _has_nested_quantifier(pattern):
+    if _BACK_REFERENCE.search(pattern) or _is_risky(_parse(_blank(pattern))[0]):
+        raise PatternRefused(_FOREVER)
+    leading = _LEADING_ANY.match(pattern)
+    stripped = pattern[leading.end() :] if leading else pattern
+    unbounded = sum(_is_unbounded(q) for q in _quantifiers(_parse(_blank(stripped))[0]))
+    if unbounded > MAX_UNBOUNDED:
         raise PatternRefused(_FOREVER)
     try:
-        return re.compile(pattern, re.IGNORECASE)
+        return re.compile(stripped, re.IGNORECASE)
     except re.error as e:
         raise PatternRefused(f"Not a valid pattern: {e}") from e
 
@@ -195,15 +292,17 @@ def regex(compiled: re.Pattern[str], text: str) -> bool:
 
 def matcher(mode: str, query: str, tolerance: int) -> Callable[[str], bool]:
     """The predicate for one scan: "fragment", "words" or "regex"; prepared once."""
+    if not 0 <= tolerance <= MAX_TOLERANCE:
+        raise ValueError("tolerance must be 0, 1 or 2")
     if mode == "regex":
         compiled = compile_pattern(query)
         return lambda text: regex(compiled, text)
     if mode == "fragment" and tolerance == 0:
         folded = fold(query)
         return lambda text: bool(folded) and folded in fold(text)
-    query_words = words_of(query)
+    prepared = _prepare(words_of(query), tolerance)
     if mode == "fragment":
-        return lambda text: _all_fragments_found(query_words, words_of(text), tolerance)
+        return lambda text: _all_fragments_found(prepared, set(words_of(text)))
     if mode == "words":
-        return lambda text: _all_words_found(query_words, words_of(text), tolerance)
+        return lambda text: _all_words_found(prepared, set(words_of(text)))
     raise ValueError(f"Unknown match mode: {mode!r}.")

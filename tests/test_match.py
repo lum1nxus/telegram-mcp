@@ -84,6 +84,19 @@ def test_fuzzy_word() -> None:
     assert not fuzzy_word("tractor", "garden", 2)  # false positive must not match
 
 
+def test_fuzzy_word_short_words_skip_the_trigram_gate() -> None:
+    assert fuzzy_word("kota", "kata", 1)
+    assert fuzzy_word("кран", "крон", 1)
+    assert fuzzy_word("dach", "dech", 1)
+    assert not fuzzy_word("kosa", "kasza", 1)  # distance 2
+    assert not fuzzy_word("tomek", "tomke", 2)  # a transposition is 2 edits; clamped to 1
+
+
+def test_fuzzy_word_long_words_pass_the_gate() -> None:
+    assert not fuzzy_word("tractor", "zzzzzzz", 2)
+    assert fuzzy_word("kosiarka", "kosiarke", 2)
+
+
 def test_fragment_inside_a_compound() -> None:
     assert fragment("трактор", "взяли минитрактор")
     assert fragment("ТРАКТОР", "взяли Минитрактор")
@@ -116,7 +129,20 @@ def test_regex_scans_at_most_4096_characters() -> None:
     assert not regex(compiled, "x" * 4096 + "needle")
 
 
-@pytest.mark.parametrize("pattern", ["мини.?трактор", r"\bteplic\w*", "(ab)+c", "a{2,3}b"])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "мини.?трактор",
+        r"\bteplic\w*",
+        "(ab)+c",
+        "a{2,3}b",
+        "теплиц.*цена",
+        "cena|price",
+        "Zielon.? firma",
+        r"\*+ ogłoszenie",
+        "[*+]+x",
+    ],
+)
 def test_legitimate_patterns_compile(pattern: str) -> None:
     compiled = compile_pattern(pattern)
     assert isinstance(compiled, re.Pattern)
@@ -124,11 +150,52 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "pattern", ["(a+)+$", "(.*)*", "(x|y*)*", r"(\w+)\1", "(a+){2,}", r"(?P<g>a)(?P=g)"]
+    "pattern",
+    [
+        "(a+)+$",
+        "(.*)*",
+        "(x|y*)*",
+        r"(\w+)\1",
+        "(a+){2,}",
+        r"(?P<g>a)(?P=g)",
+        # a quantified group holding a quantifier, bounded counts included
+        "(a?){25}",
+        "(a{2,10}){2,10}",
+        "(.*a){20}",
+        "((ab)+)+",
+        # a quantified group holding an alternation
+        "(a|aa)+",
+        "(a|a?)*",
+        "(a|ab){2,}",
+        # two unbounded atoms in a row
+        "a*a*",
+        ".*.*",
+        r"\s*\s*",
+        "[а-я]*[а-я ]*",
+        r"\w+\w*",
+        "a+?a{2,}",
+        # more than three unbounded quantifiers
+        "a+-b+-c+-d+",
+        "teplic.*cena.*dach.*kosa.*grabie",
+    ],
 )
 def test_catastrophic_patterns_are_refused(pattern: str) -> None:
     with pytest.raises(PatternRefused, match="could run forever"):
         compile_pattern(pattern)
+
+
+def test_three_unbounded_quantifiers_are_allowed() -> None:
+    compile_pattern("a+-b+-c+")
+    compile_pattern(".*-a+-b+-c+")  # the leading .* is stripped before counting
+
+
+def test_leading_any_is_stripped() -> None:
+    assert compile_pattern(".*abc").pattern == "abc"
+    assert compile_pattern("^.+abc").pattern == "abc"
+    assert compile_pattern(".*?abc").pattern == ".*?abc"  # a lazy prefix is left alone
+    compiled = compile_pattern(".*теплиц.*цена")
+    assert compiled.pattern == "теплиц.*цена"
+    assert regex(compiled, "у нас теплица, цена 100")
 
 
 def test_long_pattern_is_refused() -> None:
@@ -156,6 +223,12 @@ def test_matcher_modes() -> None:
         matcher("regex", "(a+)+", 0)
     with pytest.raises(ValueError, match="mode"):
         matcher("glob", "x", 0)
+
+
+@pytest.mark.parametrize("tolerance", [-1, 3])
+def test_matcher_refuses_tolerance_out_of_range(tolerance: int) -> None:
+    with pytest.raises(ValueError, match="tolerance must be 0, 1 or 2"):
+        matcher("words", "teplica", tolerance)
 
 
 def test_deterministic() -> None:
