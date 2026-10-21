@@ -39,7 +39,8 @@ _QUANTIFIER = re.compile(r"(?:[*+?]|\{(?:\d+,?\d*|,\d+)\})[?+]?")
 _UNBOUNDED = re.compile(r"(?:[*+]|\{\d+,\})[?+]?")
 _GROUP_PREFIX = re.compile(r"\?(?:P<\w+>|<[=!]|[=!:>]|[aiLmsux-]+:?)?")
 _LEADING_ANY = re.compile(r"(\(\?[aiLmsux]+\))?\.\*\??(?![*+?{]|\.[*+])")
-_VERBOSE_OR_COMMENT = re.compile(r"\(\?(?:#|[aiLmsux-]*x[aiLmsux-]*[:)])")
+_VERBOSE_OR_COMMENT = re.compile(r"\(\?(?:#|\(|[aiLmsux-]*x[aiLmsux-]*[:)])")
+_EMPTY_BRANCH = re.compile(r"\|\||\|\)|\|$|^\||\((?:\?[^()|]*)?\|")
 # Blanking: an escape or a character class becomes one atom. The six shorthand classes keep
 # an identity (private-use characters) so that provably disjoint neighbours can be told apart;
 # the zero-width assertions \b \B \A \Z get their own marker; every other escape and every
@@ -307,7 +308,7 @@ def _has_unbounded_in_a_row(group: _Group) -> bool:
     """
     reachable: list[str] = []  # unbounded atoms the next atom can be adjacent to
     for atom, quantifier in _run(group):
-        nullable = quantifier.startswith(("*", "?", "{0,", "{,")) or (
+        nullable = quantifier.startswith(("*", "?", "{0,", "{,", "{0}")) or (
             not quantifier and atom in _CONSUMES_NOTHING
         )
         if _is_unbounded(quantifier):
@@ -350,8 +351,10 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     atom, so `\\*`, `[*+]` and `\\(` are not taken for syntax. In this order:
     - a pattern longer than `MAX_PATTERN_CHARS` characters is refused;
     - back-references `\\1`...`\\9` and `(?P=name)` are refused;
-    - comments `(?#...)` and the verbose flag `x` in any inline flag group (`(?x)`, `(?ix)`,
-      `(?x:...)`) are refused: ignored whitespace would hide a run (`(?x)x* x*=`);
+    - comments `(?#...)`, conditionals `(?(1)...)` and the verbose flag `x` in any inline
+      flag group (`(?x)`, `(?ix)`, `(?x:...)`) are refused: ignored whitespace would hide a
+      run (`(?x)x* x*=`), and so would an empty branch, so `(|y)`, `(?:y|)`, `a||b` are
+      refused too;
     - any quantifier on a group that contains a quantifier, bounded counts and `?` included:
       `(a+)+`, `(a?){25}`, `(a{2,10}){2,10}`, `(.*a){20}`, `((ab)+)+` are refused;
     - any quantifier on a group that contains `|`, at any depth: `(a|aa)+`, `(a|ab){2,}` are
@@ -363,7 +366,7 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     - two unbounded atoms in a row (`*`, `+`, `{n,}`, lazy forms included) are refused:
       `a*a*`, `.*.*`, `\\w+\\w*`. Unquantified plain groups are seen through (`(.*)(.*)=`,
       `x*()x*=`) and an atom that may match nothing does not break the run (`a*b?a*c`,
-      `x*(y)?x*=`, `\\d+\\s*\\d+`), nor does a zero-width atom: `^`, `$`, `\\b`, `\\B`,
+      `x*(y)?x*=`, `x*y{0}x*=`, `\\d+\\s*\\d+`), nor does a zero-width atom: `^`, `$`, `\\b`, `\\B`,
       `\\A`, `\\Z` or an unquantified lookaround (`x*(?=x)x*=`, `\\d*\\B\\d*=`).
       Exception: atoms whose characters provably never overlap do not form a run; only the
       shorthand pairs `\\d`/`\\s`, `\\d`/`\\D`, `\\s`/`\\S`, `\\w`/`\\W`, `\\w`/`\\s`, and
@@ -381,7 +384,12 @@ def compile_pattern(pattern: str) -> re.Pattern[str]:
     """
     if len(pattern) > MAX_PATTERN_CHARS:
         raise PatternRefused(_TOO_LONG)
-    if _BACK_REFERENCE.search(pattern) or _VERBOSE_OR_COMMENT.search(_blank(pattern)):
+    blanked = _blank(pattern)
+    if (
+        _BACK_REFERENCE.search(pattern)
+        or _VERBOSE_OR_COMMENT.search(blanked)
+        or _EMPTY_BRANCH.search(blanked)
+    ):
         raise PatternRefused(_FOREVER)
     leading = _LEADING_ANY.match(pattern)
     stripped = (leading.group(1) or "") + pattern[leading.end() :] if leading else pattern

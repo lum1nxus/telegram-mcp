@@ -202,6 +202,14 @@ def test_legitimate_patterns_compile(pattern: str) -> None:
         "(?ix)teplic",
         "(?x:teplic)",
         "teplic(?#c)",
+        # a {0} atom, an empty branch and a conditional match nothing: they must not hide a run
+        "x*y{0}x*=",
+        "x*(?:y){0}x*=",
+        "x*(|y)x*=",
+        "x*(?:y|)x*=",
+        "a||b",
+        "()x*(?(1)|)x*=",
+        "(x)?x*(?(1)|)x*=",
         # two unbounded atoms in a row
         "a*a*",
         ".*.*",
