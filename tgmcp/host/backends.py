@@ -255,7 +255,7 @@ class OllamaBackend(_Base):
         capabilities = shown.get("capabilities")
         if isinstance(capabilities, list) and "tools" not in capabilities:
             raise BackendError(
-                f"Model {self.model} cannot call tools; pick one from the README list."
+                f"Model {self.model} cannot call tools; pick one from docs/local-models.md."
             )
 
 

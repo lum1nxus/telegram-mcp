@@ -20,7 +20,7 @@ You need Python 3.14 and Git. The commands are for **cmd.exe**; in Git Bash writ
 5. `claude mcp add --scope user telegram -- "%CD%\.venv\Scripts\tgmcp.exe" serve` (Claude Code; other clients: [docs/setup.md](docs/setup.md))
 6. Start a new Claude Code session.
 
-Then ask Claude Code (or your other client) about your chats.
+Then ask your client or model about your chats.
 
 With a local model instead (Ollama installed, model pulled): `.venv\Scripts\tgmcp ask "What did Nora say about the boots?" --model gemma4:12b`. See [docs/local-models.md](docs/local-models.md).
 
