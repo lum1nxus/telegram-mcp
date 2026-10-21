@@ -204,6 +204,7 @@ ALLOWED_TELETHON_API = frozenset(
         "PhoneCodeExpiredError",
         "PhoneCodeInvalidError",
         "PhoneNumberInvalidError",
+        "PhoneNumberUnoccupiedError",
         "RPCError",
         "SearchQueryEmptyError",
         "SessionPasswordNeededError",
@@ -243,6 +244,7 @@ PYTHON_ATTRIBUTES = frozenset(
         "CalledProcessError",
         "create_task",
         "format_tb",
+        "isdisjoint",
         "join",
         "__traceback__",
         "__init__",
@@ -262,6 +264,8 @@ DYNAMIC_ATTRIBUTES = frozenset(
     {
         "__dict__",
         "__mro__",
+        "__class__",
+        "getmembers",
         "__subclasses__",
         "__getattribute__",
         "__globals__",
@@ -272,7 +276,31 @@ DYNAMIC_ATTRIBUTES = frozenset(
         "import_module",
     }
 )
-DYNAMIC_MODULES = ("importlib", "operator", "alltlobjects", "tlobjects", "builtins")
+DYNAMIC_MODULES = ("importlib", "operator", "alltlobjects", "tlobjects", "builtins", "inspect")
+# The one dynamic name the package needs: the guard reads a request's own attributes with
+# `vars` to refuse an instance-level `_bytes` or `resolve`.
+DYNAMIC_EXEMPTIONS = {"telegram/client.py": frozenset({"vars"})}
+# Attributes nothing may assign or delete: the guard's lists and hook, what a request sends,
+# and (with TELETHON_SURFACE) every attribute of a Telethon client, message or dialog.
+GUARDED_ATTRIBUTES = frozenset(
+    {
+        "_call",
+        "_LISTS",
+        "allowed",
+        "ALLOWED_REQUESTS",
+        "AUTH_REQUESTS",
+        "_bytes",
+        "__bytes__",
+        "resolve",
+        "to_dict",
+        "__class__",
+        "_sender",
+        "CONSTRUCTOR_ID",
+    }
+)
+CLIENT_CLASSES = frozenset({"TelegramClient", "_AllowlistClient", "ReadOnlyClient", "AuthClient"})
+# Where a class may extend a client: the guard's own module, and only these two bases.
+SUBCLASS_EXEMPTIONS = {"telegram/client.py": frozenset({"TelegramClient", "_AllowlistClient"})}
 NAME_LOOKUPS = frozenset({"getattr", "setattr", "delattr", "hasattr"})
 MANGLED = re.compile(r"_[A-Za-z]\w*__\w+")
 
@@ -407,12 +435,60 @@ def _telethon(node: ast.AST, own: frozenset[str]) -> list[str]:
 # --- the checker -----------------------------------------------------------------------------
 
 
-def violations(source: str, *, telegram: bool, own: frozenset[str] = frozenset()) -> list[str]:
-    """Everything (a), (c) and, for a module of the telegram package, (b) find in `source`."""
+def _base_names(node: ast.ClassDef) -> list[str]:
+    names: list[str] = []
+    for base in node.bases:
+        if isinstance(base, ast.Name):
+            names.append(base.id)
+        elif isinstance(base, ast.Attribute):
+            names.append(".".join(_chain(base)))
+    return names
+
+
+def _tampering(node: ast.AST, module: str) -> list[str]:
+    """Assigning the guard's attributes, calling `_call` past it, subclassing a client or a
+    request: the ways to make the runtime guard check one thing and send another."""
+    line = getattr(node, "lineno", 0)
+    if isinstance(node, ast.Attribute):
+        if isinstance(node.ctx, ast.Store | ast.Del) and (
+            node.attr in GUARDED_ATTRIBUTES or node.attr in TELETHON_SURFACE
+        ):
+            return [f"line {line}: assigns {node.attr}"]
+        through_super = (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "super"
+        )
+        if node.attr == "_call" and isinstance(node.ctx, ast.Load) and not through_super:
+            return [f"line {line}: calls _call past the guard"]
+    if isinstance(node, ast.ClassDef):
+        allowed = SUBCLASS_EXEMPTIONS.get(module, frozenset())
+        bad = [
+            b
+            for b in _base_names(node)
+            if b not in allowed
+            and (
+                b in CLIENT_CLASSES
+                or b.split(".")[0] in {"functions", "types", "telethon"}
+                or b.endswith("Request")
+            )
+        ]
+        return [f"line {line}: class {node.name} extends {b}" for b in bad]
+    return []
+
+
+def violations(
+    source: str, *, telegram: bool, own: frozenset[str] = frozenset(), module: str = ""
+) -> list[str]:
+    """Everything (a), (c) and, for a module of the telegram package, (b) find in `source`.
+    `module` is the path under `tgmcp/` (with `/`), for the few per-module exemptions."""
     tree = ast.parse(source)
     bad: list[str] = []
+    exempt = DYNAMIC_EXEMPTIONS.get(module, frozenset())
     for node in ast.walk(tree):
-        bad += _denylist(node) + _dynamic(node)
+        bad += _denylist(node) + _tampering(node, module)
+        if not (isinstance(node, ast.Name) and node.id in exempt):
+            bad += _dynamic(node)
         if telegram:
             bad += _telethon(node, own)
         elif isinstance(node, ast.Import | ast.ImportFrom):
@@ -442,7 +518,14 @@ def test_whole_package_passes_the_checker():
     found = {
         str(path.relative_to(PACKAGE)): bad
         for path, source in _modules()
-        if (bad := violations(source, telegram=TELEGRAM in path.parents, own=OWN))
+        if (
+            bad := violations(
+                source,
+                telegram=TELEGRAM in path.parents,
+                own=OWN,
+                module=path.relative_to(PACKAGE).as_posix(),
+            )
+        )
     }
     assert found == {}
 
@@ -552,6 +635,43 @@ BYPASSES = {
         "from telethon.tl.functions.messages import GetHistoryRequest",
         False,
     ),
+    # The re-review's forgeries (N1): make the guard check one request and send another.
+    "O1 an instance-level _bytes": (
+        "req = functions.messages.GetHistoryRequest(p, 0, None, 0, 1, 0, 0, 0)\n"
+        "req._bytes = lambda: payload\nawait client(req)",
+        True,
+    ),
+    "O2 a __class__ swap": (
+        "req.__class__ = functions.messages.GetHistoryRequest\nawait client(req)",
+        True,
+    ),
+    "O3 an instance-level resolve": ("req.resolve = swap_back\nawait client(req)", True),
+    "O4 replacing the guard's hook": ("ReadOnlyClient._call = TelegramClient._call", True),
+    "O5 widening an instance's list": ("client.allowed = frozenset()", True),
+    "O6 widening the class's list": ("type(client).allowed = frozenset()", True),
+    "O7 a request subclass with its own bytes": (
+        "class Evil(functions.messages.GetHistoryRequest):\n"
+        "    def _bytes(self):\n        return payload",
+        True,
+    ),
+    "O8 calling Telethon's _call past the guard": (
+        "await TelegramClient._call(client, sender, req)",
+        True,
+    ),
+    "O9 a __class__ swap outside the package": ("req.__class__ = Other", False),
+    "O10 forging from an allowed class in cli.py": (
+        "next(iter(ALLOWED_REQUESTS))(p)._bytes = forged",
+        False,
+    ),
+    "O11 inspect reaches the mangled client": (
+        "import inspect\nmembers = inspect.getmembers(app.gateway)",
+        False,
+    ),
+    "O12 a client subclass outside client.py": (
+        "class Wide(ReadOnlyClient):\n    pass",
+        False,
+    ),
+    "O13 widening the module's list": ("client.ALLOWED_REQUESTS = frozenset()", False),
     "N an unlisted read is still refused inside the package": (
         "await client.get_participants(p)",
         True,
@@ -676,3 +796,53 @@ async def test_auth_client_may_sign_in_and_log_out_but_not_write(sent: list[Any]
     with pytest.raises(ReadOnlyViolation, match="GetHistoryRequest"):
         await client(functions.messages.GetHistoryRequest(PEER, 0, None, 0, 1, 0, 0, 0))
     assert sent == [functions.auth.LogOutRequest()]
+
+
+def _history() -> Any:
+    return functions.messages.GetHistoryRequest(PEER, 0, None, 0, 1, 0, 0, 0)
+
+
+async def test_a_request_with_its_own_bytes_is_refused(sent: list[Any]):
+    forged = _history()
+    forged._bytes = lambda: bytes(REFUSED[0])  # GetHistory outside, SendMessage on the wire
+    with pytest.raises(ReadOnlyViolation, match="own serialisation"):
+        await _client()(forged)
+    swapped = _history()
+
+    async def swap(client: Any, utils: Any) -> None:
+        swapped.__class__ = functions.messages.SendMessageRequest
+
+    swapped.resolve = swap
+    with pytest.raises(ReadOnlyViolation, match="own serialisation"):
+        await _client()(swapped)
+    assert sent == []
+
+
+async def test_a_resolve_that_changes_the_class_is_caught_after_it(
+    sent: list[Any], monkeypatch: pytest.MonkeyPatch
+):
+    async def becomes_a_write(self: Any, client: Any, utils: Any) -> None:
+        self.__class__ = functions.messages.SendMessageRequest
+
+    monkeypatch.setattr(functions.messages.GetHistoryRequest, "resolve", becomes_a_write)
+    with pytest.raises(ReadOnlyViolation, match="SendMessageRequest"):
+        await _client()(_history())
+    assert sent == []
+
+
+async def test_the_list_comes_from_the_module_not_the_instance(sent: list[Any]):
+    client = _client()
+    client.allowed = frozenset({functions.messages.SendMessageRequest})  # ignored
+    with pytest.raises(ReadOnlyViolation, match="SendMessageRequest"):
+        await client(REFUSED[0])
+
+    class Wider(ReadOnlyClient):  # a subclass has no list of its own: it may send nothing
+        pass
+
+    with pytest.raises(ReadOnlyViolation, match="GetHistoryRequest"):
+        await _client(Wider)(_history())
+    assert sent == []
+
+
+def test_the_login_client_may_follow_a_channel_gap():
+    assert functions.updates.GetChannelDifferenceRequest in AUTH_REQUESTS

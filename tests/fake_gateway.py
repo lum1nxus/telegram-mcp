@@ -3,14 +3,14 @@
 It follows the live gateway where the tools can tell the difference: `until` of a history is
 exclusive (Telegram's `offset_date`), service messages (ids in `service`) are skipped and a long
 run of them stops a page early with a cursor, the context of a forum message stays in its
-topic, and `sender` resolves only users the session has seen (user dialogs and the senders of
-messages already returned), with the live gateway's sentence.
+topic, and `sender` resolves only users of the dialog list (all the live gateway promises),
+with the live gateway's sentence.
 """
 
 import re
 from datetime import date, datetime
 
-from tgmcp.gateway import RAW_PER_MESSAGE, UNSEEN_USER, GatewayError, History
+from tgmcp.gateway import RAW_PER_MESSAGE, UNSEEN_USER, GatewayError, History, Hits
 from tgmcp.models import Account, Chat, Message, Topic
 
 
@@ -36,7 +36,6 @@ class FakeGateway:
         self.service: dict[int, set[int]] = {}  # chat id -> ids of service messages
         self.raise_next: GatewayError | None = None
         self.calls: list[str] = []
-        self._seen_users: set[int] = set()
 
     def _enter(self, name: str) -> None:
         self.calls.append(name)
@@ -46,10 +45,6 @@ class FakeGateway:
 
     def _plain(self, chat_id: int, m: Message) -> bool:
         return m.id not in self.service.get(chat_id, set())
-
-    def _seen(self, found: list[Message]) -> list[Message]:
-        self._seen_users |= {m.sender_id for m in found if m.sender_id is not None}
-        return found
 
     async def me(self) -> Account:
         self._enter("me")
@@ -95,14 +90,14 @@ class FakeGateway:
         out: list[Message] = []
         for seen, m in enumerate(stream, start=1):
             if since is not None and m.date < since:
-                return History(self._seen(out), None)
+                return History(out, None)
             if self._plain(chat_id, m):
                 out.append(m)
                 if len(out) >= limit:
-                    return History(self._seen(out), m.id)
+                    return History(out, m.id)
             if seen >= limit * RAW_PER_MESSAGE:
-                return History(self._seen(out), m.id, stopped_early=True)
-        return History(self._seen(out), None)
+                return History(out, m.id, stopped_early=True)
+        return History(out, None)
 
     def _filter(
         self, chat_id: int, query: str, since: date | None, until: date | None
@@ -121,7 +116,7 @@ class FakeGateway:
             return None
         users = [c for c in self.chats if c.kind == "user"]
         if not sender.startswith("@"):
-            if int(sender) in self._seen_users | {c.id for c in users}:
+            if int(sender) in {c.id for c in users}:
                 return int(sender)
             raise GatewayError(UNSEEN_USER)
         for chat in users:
@@ -151,15 +146,15 @@ class FakeGateway:
             and (sender_id is None or m.sender_id == sender_id)
         ]
         found.sort(key=lambda m: m.id, reverse=True)
-        return self._seen(found[:limit])
+        return found[:limit]
 
     async def search_global(
         self, query: str, *, since: date | None, until: date | None, limit: int
-    ) -> list[Message]:
+    ) -> Hits:
         self._enter("search_global")
         found = [m for chat_id in self.messages for m in self._filter(chat_id, query, since, until)]
         found.sort(key=lambda m: m.date, reverse=True)
-        return self._seen(found[:limit])
+        return Hits(found[:limit])
 
     async def around(
         self, chat_id: int, message_id: int, *, before: int, after: int
@@ -177,8 +172,7 @@ class FakeGateway:
         later = thread[index + 1 : index + 1 + after]
         earlier = [m for m in earlier if self._plain(chat_id, m)]
         later = [m for m in later if self._plain(chat_id, m)]
-        self._seen([target])
-        return self._seen(earlier), target, self._seen(later)
+        return earlier, target, later
 
     async def close(self) -> None:
         self._enter("close")

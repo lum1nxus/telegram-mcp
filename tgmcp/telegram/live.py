@@ -20,6 +20,7 @@ from tgmcp.gateway import (
     Gateway,
     GatewayError,
     History,
+    Hits,
     IdleGuard,
     NotLoggedIn,
     aware,
@@ -321,10 +322,12 @@ class TelethonGateway(Gateway):
 
     @staticmethod
     def _input_user(client: _Client, value: str | None) -> Any:
-        """A user this process has already seen: in the dialog list, or as the sender or a
-        mention of a message a tool loaded (Telethon's in-memory session keeps every user a
-        response carried). Never a network lookup: resolving a username is one of Telegram's
-        most flood-limited requests, and a loop over names would block the account."""
+        """A user Telethon's in-memory session already holds with an access hash: users of
+        the dialog list for sure, sometimes others a response carried in full (contacts,
+        members of small groups). Senders in supergroups and channels usually arrive as `min`
+        users, which the session drops, so they are not found; the sentence promises only the
+        dialog list. Never a network lookup: resolving a username is one of Telegram's most
+        flood-limited requests, and a loop over names would block the account."""
         if value is None:
             return None
         numeric = re.fullmatch(r"\d+", value) is not None
@@ -382,20 +385,20 @@ class TelethonGateway(Gateway):
 
     async def search_global(
         self, query: str, *, since: date | None, until: date | None, limit: int
-    ) -> list[Message]:
+    ) -> Hits:
         async with self._session() as client:
             # Newest first, starting at the end of `until`; stop at the first hit before `since`.
             stream = client.iter_messages(
                 None, search=query, limit=limit * RAW_PER_MESSAGE, offset_date=day_end(until)
             )
-            found, _, _ = await _collect(
+            found, _, early = await _collect(
                 stream,
                 limit,
                 lambda m: since is not None and m.date.astimezone(UTC).date() < since,
             )
             out = [self._map(m, m.chat_id) for m in found]
-        log.info("search_global n=%d", len(out))
-        return out
+        log.info("search_global n=%d early=%s", len(out), early)
+        return Hits(out, early)
 
     async def around(
         self, chat_id: int, message_id: int, *, before: int, after: int

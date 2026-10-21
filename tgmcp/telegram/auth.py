@@ -16,6 +16,8 @@ from tgmcp.telegram.client import AuthClient, ReadOnlyViolation
 from tgmcp.telegram.errors import DEAD_SESSION, refused
 
 _UNREADABLE = "The session file is unreadable: run `tgmcp login` again."
+NOT_A_BOT = "tgmcp works with a user account, not a bot token."
+_BOT_LOGIN = "ImportBotAuthorizationRequest"
 
 
 def load_session_string(path: Path) -> str:
@@ -71,6 +73,8 @@ async def _console_login(  # noqa: C901, PLR0912 - one except per case
         me = await client.get_me()
         login: str = StringSession.save(client.session)
     except ReadOnlyViolation as e:  # before RuntimeError, which it is
+        if e.request_name == _BOT_LOGIN:  # a bot token typed at the phone prompt
+            raise GatewayError(NOT_A_BOT) from e
         raise refused(e) from e
     except EOFError as e:  # Telethon asks with input(); stdin is closed or not a terminal
         raise GatewayError(NO_TERMINAL) from e
@@ -91,8 +95,12 @@ async def _console_login(  # noqa: C901, PLR0912 - one except per case
         raise GatewayError("The two-step password was wrong: run `tgmcp login` again.") from e
     except errors.PhoneNumberInvalidError as e:
         raise GatewayError("That phone number is not valid.") from e
+    except errors.PhoneNumberUnoccupiedError as e:
+        raise GatewayError("That phone number has no Telegram account.") from e
     except errors.FloodWaitError as e:
         raise Busy(seconds=int(e.seconds)) from e
+    except errors.RPCError as e:  # banned number, too many attempts, ...: one sentence
+        raise GatewayError(f"Telegram refused the login: {type(e).__name__}.") from e
     except OSError as e:
         raise GatewayError("Could not reach Telegram: check the network and try again.") from e
     finally:

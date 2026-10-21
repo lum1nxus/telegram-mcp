@@ -16,7 +16,7 @@ A request missing from the list fails closed: `ReadOnlyViolation` names its clas
 sent. Widening a list needs a pull request that says why the request cannot change anything.
 """
 
-from typing import Any, ClassVar
+from typing import Any
 
 from telethon import TelegramClient, utils
 from telethon.sessions import StringSession
@@ -60,6 +60,7 @@ AUTH_REQUESTS: frozenset[type[Any]] = frozenset(
         functions.users.GetUsersRequest,  # get_me: is there a login already, who is it
         functions.updates.GetStateRequest,  # the login hook after sign-in
         functions.updates.GetDifferenceRequest,  # the login hook after sign-in
+        functions.updates.GetChannelDifferenceRequest,  # the update loop, for a channel gap
         functions.help.GetConfigRequest,  # the phone lives on another data centre
         functions.auth.SendCodeRequest,  # asks Telegram to send the login code
         functions.auth.ResendCodeRequest,  # Telethon's resend when a code was already asked
@@ -71,17 +72,32 @@ AUTH_REQUESTS: frozenset[type[Any]] = frozenset(
 )
 
 
-def _check(allowed: frozenset[type[Any]], request: Any) -> Any:
-    """The request itself, or a list of them; raises before anything is sent."""
-    batch = list(request) if utils.is_list_like(request) else None
-    for item in batch if batch is not None else [request]:
-        if type(item) not in allowed:
-            raise ReadOnlyViolation(type(item).__name__)
-    return batch if batch is not None else request
+# Methods a request object must take from its class: an instance-level `_bytes` would put other
+# bytes on the wire, an instance-level `resolve` could change the object after the check.
+_CLASS_ONLY = frozenset({"_bytes", "__bytes__", "resolve", "to_dict"})
+
+
+def _check_one(allowed: frozenset[type[Any]], item: Any) -> None:
+    name = type(item).__name__
+    if type(item) not in allowed:
+        raise ReadOnlyViolation(name)
+    if not _CLASS_ONLY.isdisjoint(vars(item)):  # the one `vars` the contract test allows
+        raise ReadOnlyViolation(f"{name} (with its own serialisation)")
+
+
+def _items(request: Any) -> tuple[list[Any], bool]:
+    if utils.is_list_like(request):
+        return list(request), True
+    return [request], False
 
 
 class _AllowlistClient(TelegramClient):  # type: ignore[misc]  # Telethon has no type hints
-    allowed: ClassVar[frozenset[type[Any]]] = frozenset()
+    """Refuses every request whose exact class is not on the list of its own class.
+
+    The list comes from `_LISTS` by the exact class of the client, never from an attribute an
+    instance could replace; a subclass that is not in `_LISTS` may send nothing. The request
+    is checked, resolved, and checked again, so a `resolve` that changes the object is caught.
+    """
 
     async def _call(
         self,
@@ -90,22 +106,32 @@ class _AllowlistClient(TelegramClient):  # type: ignore[misc]  # Telethon has no
         ordered: bool = False,
         flood_sleep_threshold: int | None = None,
     ) -> Any:
-        checked = _check(self.allowed, request)
+        allowed = _LISTS.get(type(self), frozenset())
+        items, batch = _items(request)
+        for item in items:
+            _check_one(allowed, item)
+            await item.resolve(self, utils)
+            _check_one(allowed, item)
         return await super()._call(
-            sender, checked, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold
+            sender,
+            items if batch else items[0],
+            ordered=ordered,
+            flood_sleep_threshold=flood_sleep_threshold,
         )
 
 
 class ReadOnlyClient(_AllowlistClient):
     """The client the MCP server uses."""
 
-    allowed = ALLOWED_REQUESTS
-
 
 class AuthClient(_AllowlistClient):
     """The client `tgmcp login` and `tgmcp logout` use."""
 
-    allowed = AUTH_REQUESTS
+
+_LISTS: dict[type[Any], frozenset[type[Any]]] = {
+    ReadOnlyClient: ALLOWED_REQUESTS,
+    AuthClient: AUTH_REQUESTS,
+}
 
 
 def make_client(settings: Settings, session: str, api_hash: str) -> ReadOnlyClient:

@@ -29,10 +29,10 @@ What the tool protects, against what. "Yes" means the design stops it; "No" mean
 
 ## What the tool never does
 
-- It never sends, edits, deletes, forwards or reacts, and it never marks anything as read. A runtime guard enforces it: tgmcp's Telethon client (`ReadOnlyClient`) refuses every request that is not on a short list of reading requests, before anything leaves the computer, whoever builds the request (including the methods of a returned message, such as `reply` or `delete`). The login client may additionally sign in and log out, nothing else. A contract test checks both lists at run time and reads the source for write-shaped names and dynamic lookups.
+- It never sends, edits, deletes, forwards or reacts, and it never marks anything as read. A runtime guard enforces it: tgmcp's Telethon client (`ReadOnlyClient`) refuses every request that is not on a short list of reading requests, before anything leaves the computer. It stops every write that goes through the client, including Telethon's own helper methods and the methods of returned objects (a message's `reply` or `delete`). The login client may additionally sign in and log out, nothing else. Code inside this package that deliberately subverts the guard (replacing its list, forging a request object) is caught by the contract test, which reads the source, and by review. A malicious fork or a patched library is out of scope: you run the code you install, so install only from this repository.
 - It never writes message text to disk or to the log, and it has no telemetry.
 - It never contacts any server except Telegram's.
-- It never looks up a username on Telegram's servers for a `sender` filter: only people already seen in the session are accepted.
+- It never looks up a username on Telegram's servers for a `sender` filter: only users of your dialog list can be named reliably.
 
 ## Good habits
 

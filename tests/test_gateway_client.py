@@ -368,10 +368,17 @@ async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway)
     stub = _stub(gw)
     stub.messages["plain"] = [_m(10), _service(9), _m(8), _m(7)]
     out = await gw.search_global("x", since=None, until=None, limit=2)
-    assert [m.id for m in out] == [10, 8]
+    assert ([m.id for m in out.messages], out.stopped_early) == ([10, 8], False)
     assert stub.iter_calls[-1]["limit"] == 8
     later = await gw.search_global("x", since=date(2030, 1, 1), until=None, limit=2)
-    assert later == []
+    assert later.messages == []
+
+
+async def test_search_global_reports_its_safety_stop(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["plain"] = [_m(20), *(_service(i) for i in range(19, 5, -1)), _m(5)]
+    out = await gw.search_global("x", since=None, until=None, limit=2)
+    assert ([m.id for m in out.messages], out.stopped_early) == ([20], True)
 
 
 class LoginClient:
@@ -501,6 +508,30 @@ async def test_login_whose_permissions_fail_says_so(login_settings: Settings, mo
     monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
     with pytest.raises(GatewayError, match="file permissions could not be set"):
         await auth.interactive_login(login_settings, "h")
+
+
+@pytest.mark.parametrize(
+    ("error", "sentence"),
+    [
+        (errors.PhoneNumberUnoccupiedError(None), "That phone number has no Telegram account."),
+        (
+            errors.PhoneNumberBannedError(None),
+            "Telegram refused the login: PhoneNumberBannedError.",
+        ),
+        (
+            ReadOnlyViolation("ImportBotAuthorizationRequest"),
+            "tgmcp works with a user account, not a bot token.",
+        ),
+    ],
+)
+async def test_login_errors_are_sentences(
+    login_settings: Settings, error: Exception, sentence: str
+):
+    LoginClient.error = error
+    with pytest.raises(GatewayError) as caught:
+        await auth.interactive_login(login_settings, "h")
+    assert str(caught.value) == sentence
+    assert _files(login_settings.home) == []
 
 
 async def test_login_without_a_terminal_says_so(login_settings: Settings):

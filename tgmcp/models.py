@@ -13,6 +13,8 @@ TEXT_CAP = 2000
 # Bytes of compact UTF-8 JSON. mcp sends a result twice (structured content and a pretty-printed
 # text copy of it), so a result at the budget is about 62 KB on the wire.
 RESULT_BUDGET = 30_000
+# A list result (list_chats, list_topics) gets one text block per item, so its copy weighs more.
+LIST_BUDGET = 25_000
 QUOTE_CAP = 60
 SEARCH_NOTE = (
     "Telegram's search matches the beginnings of words, not fragments: "
