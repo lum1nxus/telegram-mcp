@@ -39,14 +39,14 @@ All later commands are run from that folder (they start with `.venv/Scripts/...`
    ```
 
    It asks, in this order:
-   - `API id:` and `API hash:` (first time only). The hash is not shown while you type; paste it and press Enter.
+   - `API id:` and `API hash:` (first time only). The hash is not shown while you type; paste it and press Enter. The API id is saved in `config.json`; the hash is saved only in the encrypted `secrets.bin`.
    - Your phone number, with the country code, for example `+1 555 0100`.
    - The code. It arrives as a message **inside the Telegram app** (from the "Telegram" service chat), not by SMS.
    - Your two-step verification password, only if you have set one in Telegram.
 
    Telethon (the library tgmcp uses) may print a line about Telegram's Terms of Service; nothing needs to be done. At the end it prints `logged in as <your name>`.
 
-   If you typed the API id or hash wrong, Telegram rejects them; tgmcp forgets them and asks again next time. To replace saved ones by hand: `.venv/Scripts/tgmcp login --reset`.
+   If you typed the API id or hash wrong, Telegram rejects them; tgmcp forgets them and asks again next time. To replace saved ones by hand: `.venv/Scripts/tgmcp login --reset` (it also forgets the saved login, so Telegram sends a new code).
 
 4. Check that it works:
 
@@ -64,7 +64,7 @@ All later commands are run from that folder (they start with `.venv/Scripts/...`
 
    Then start a new Claude Code session; `telegram` appears in `/mcp`.
 
-Other commands: `.venv/Scripts/tgmcp logout` ends the login on Telegram and deletes the session file.
+Other commands: `.venv/Scripts/tgmcp logout` ends the login on Telegram and removes `secrets.bin`.
 
 ### If Claude Code shows `telegram ✘ failed`
 
@@ -105,11 +105,15 @@ What hiding does not cover:
 
 Everything lives in one folder: `%LOCALAPPDATA%\telegram-mcp` on Windows (or the folder in `TGMCP_HOME`).
 
-- `config.json`: API id and hash, hidden chats.
-- `telegram.session`: the saved login.
+- `secrets.bin`: the API hash and the login key, encrypted with Windows DPAPI for your Windows user account. A copy is useless on another PC or under another Windows user. It still opens for any program running as you, so keep the PC clean.
+- `config.json`: the settings that are not secret: API id, hidden chats.
 - `tgmcp-<number>.log`: a technical log without message text, one file per running server (the number is its process id). Files older than 7 days are removed automatically.
 
-The session file is the account: anyone who copies it is logged in as you. Keep it out of git, backups you share and cloud folders. When tgmcp creates the folder, it makes it readable only by your Windows user (a folder that already exists is left as it is), and `tgmcp login` restricts the session file the same way. If it leaks, run `.venv/Scripts/tgmcp logout`, or end the session in Telegram under Settings, Devices.
+When tgmcp creates the folder, it makes it readable only by your Windows user (a folder that already exists is left as it is), and `secrets.bin` is restricted the same way. If you think the login key leaked, run `.venv/Scripts/tgmcp logout`, or end the session in Telegram under Settings, Devices.
+
+If an administrator resets your Windows password (instead of you changing it yourself), Windows may no longer be able to decrypt `secrets.bin`. tgmcp then says so; run `.venv/Scripts/tgmcp login` again.
+
+Versions before 21.10.2026 kept the hash in `config.json` and the login in `telegram.session`, both in clear text. If those files are still there, tgmcp says "Old clear-text files found"; run `.venv/Scripts/tgmcp login` once. It moves the existing login into `secrets.bin` (no new code from Telegram) and removes the old files.
 
 ## Several Claude sessions and the VPN caveat
 
