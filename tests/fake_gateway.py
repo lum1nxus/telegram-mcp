@@ -87,6 +87,16 @@ class FakeGateway:
             and (until is None or m.date.date() <= until)
         ]
 
+    def _sender_id(self, sender: str | None) -> int | None:
+        if sender is None:
+            return None
+        if not sender.startswith("@"):
+            return int(sender)
+        for chat in self.chats:
+            if chat.kind == "user" and (chat.username or "").lower() == sender[1:].lower():
+                return chat.id
+        raise GatewayError(f"No user {sender} in your chats.")
+
     async def search_in_chat(  # noqa: PLR0913 - signature fixed by the interface
         self,
         chat_id: int,
@@ -101,11 +111,12 @@ class FakeGateway:
         self._enter("search_in_chat")
         if sender is not None and not re.fullmatch(r"@\w+|\d+", sender):
             raise GatewayError("sender must be a user id or @username")
+        sender_id = self._sender_id(sender)
         found = [
             m
             for m in self._filter(chat_id, query, since, until)
             if (topic is None or m.topic_id == topic)
-            and (sender is None or sender.startswith("@") or str(m.sender_id) == sender)
+            and (sender_id is None or m.sender_id == sender_id)
         ]
         found.sort(key=lambda m: m.id, reverse=True)
         return found[:limit]
