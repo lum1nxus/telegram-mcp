@@ -122,11 +122,14 @@ async def _run_calls(client: Client, turn: ModelTurn, names: list[str], state: _
             state.messages.append(_tool_message(call, correction))
             continue
         began = time.perf_counter()
-        result = await client.call_tool(call.name, call.arguments)
-        text, cut = _cap(_full_text(result))
-        state.steps.append(
-            Step(call, text, bool(result.is_error), cut, time.perf_counter() - began)
-        )
+        try:
+            result = await client.call_tool(call.name, call.arguments)
+        except Exception as exc:  # any failure goes back to the model as text
+            text, cut, is_error = f"Tool call failed: {type(exc).__name__}.", False, True
+        else:
+            text, cut = _cap(_full_text(result))
+            is_error = bool(result.is_error)
+        state.steps.append(Step(call, text, is_error, cut, time.perf_counter() - began))
         state.messages.append(_tool_message(call, text))
     return bad
 

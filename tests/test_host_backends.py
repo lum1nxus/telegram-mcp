@@ -433,3 +433,28 @@ def test_assistant_message_is_the_original_message_in_both_dialects() -> None:
 
 def test_model_turn_without_assistant_message_defaults_to_none() -> None:
     assert ModelTurn("t", (), {}).assistant_message is None
+
+
+def test_assistant_message_drops_reasoning_and_the_think_span() -> None:
+    message = {
+        "role": "assistant",
+        "content": "<think>long musing</think> Hiking Club",
+        "thinking": "more musing",
+        "tool_calls": [{"function": {"name": "list_chats", "arguments": {}}}],
+    }
+    opener = Opener({"POST /api/chat": {"message": message}})
+    turn = asyncio.run(OllamaBackend("m", opener=opener).chat([], TOOLS))
+    assert turn.assistant_message == {
+        "role": "assistant",
+        "content": "Hiking Club",
+        "tool_calls": [{"function": {"name": "list_chats", "arguments": {}}}],
+    }
+    openai_message = {
+        "role": "assistant",
+        "content": "<think>x</think>ok",
+        "reasoning_content": "y",
+        "reasoning": "z",
+    }
+    opener = Opener({"POST /v1/chat/completions": _completion(openai_message)})
+    turn = asyncio.run(OpenAICompatBackend("m", opener=opener).chat([], TOOLS))
+    assert turn.assistant_message == {"role": "assistant", "content": "ok"}
