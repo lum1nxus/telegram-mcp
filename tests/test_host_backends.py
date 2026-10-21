@@ -142,7 +142,7 @@ def test_ollama_messages_pass_through_and_reply_keeps_raw() -> None:
     opener = Opener({"POST /api/chat": {"message": {"content": "done"}}})
     msgs = [{"role": "tool", "content": "text", "tool_name": "chats"}]
     reply = asyncio.run(OllamaBackend("m", opener=opener).chat(msgs, TOOLS))
-    assert reply == ModelTurn("done", (), {"message": {"content": "done"}})
+    assert reply == ModelTurn("done", (), {"message": {"content": "done"}}, {"content": "done"})
     assert opener.requests[0][2]["messages"] == msgs
 
 
@@ -408,3 +408,28 @@ def test_default_opener_ignores_proxies_and_does_not_follow_redirects(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_assistant_message_is_the_original_message_in_both_dialects() -> None:
+    ollama_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": "list_chats", "arguments": {}}}],
+    }
+    opener = Opener({"POST /api/chat": {"message": ollama_message}})
+    turn = asyncio.run(OllamaBackend("m", opener=opener).chat([], TOOLS))
+    assert turn.assistant_message == ollama_message
+    openai_message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "x1", "type": "function", "function": {"name": "get_chat", "arguments": "{}"}}
+        ],
+    }
+    opener = Opener({"POST /v1/chat/completions": _completion(openai_message)})
+    turn = asyncio.run(OpenAICompatBackend("m", opener=opener).chat([], TOOLS))
+    assert turn.assistant_message == openai_message
+
+
+def test_model_turn_without_assistant_message_defaults_to_none() -> None:
+    assert ModelTurn("t", (), {}).assistant_message is None
