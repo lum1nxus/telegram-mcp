@@ -29,9 +29,10 @@ What the tool protects, against what. "Yes" means the design stops it; "No" mean
 
 ## What the tool never does
 
-- It never sends, edits, deletes, forwards or reacts, and it never marks anything as read. A test reads the source to keep it that way.
+- It never sends, edits, deletes, forwards or reacts, and it never marks anything as read. A runtime guard enforces it: tgmcp's Telethon client (`ReadOnlyClient`) refuses every request that is not on a short list of reading requests, before anything leaves the computer, whoever builds the request (including the methods of a returned message, such as `reply` or `delete`). The login client may additionally sign in and log out, nothing else. A contract test checks both lists at run time and reads the source for write-shaped names and dynamic lookups.
 - It never writes message text to disk or to the log, and it has no telemetry.
 - It never contacts any server except Telegram's.
+- It never looks up a username on Telegram's servers for a `sender` filter: only people already seen in the session are accepted.
 
 ## Good habits
 
