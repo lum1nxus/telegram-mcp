@@ -1,9 +1,11 @@
 """The agent loop: a local model answers one question through the six read-only tools.
 
-The loop talks to the tools through the MCP SDK's in-process `Client`, so the model sees exactly
-what Claude Code sees. It stays dialect-free: the assistant message that carried tool calls is
-handed back as the backend returned it (`ModelTurn.assistant_message`); only when a backend
-gives none (test doubles) does the loop build a neutral one. Tool messages carry both
+The loop talks to the tools through the MCP SDK's in-process `Client`, so the model sees what
+Claude Code sees: the same tool listings and results, and the server's instructions after the
+host's own system prompt. It stays dialect-free: the assistant message that carried tool calls
+is handed back in the backend's own dialect (`ModelTurn.assistant_message`, which the backend
+returns without the model's reasoning); only when a backend gives none (test doubles) does the
+loop build a neutral one. Tool messages carry both
 `tool_call_id` (the OpenAI dialect) and `tool_name` (Ollama); each dialect ignores the other.
 """
 
@@ -138,11 +140,16 @@ async def _run_calls(client: Client, turn: ModelTurn, names: list[str], state: _
 async def run_question(
     question: str, backend: ChatBackend, server: MCPServer, *, max_steps: int = DEFAULT_MAX_STEPS
 ) -> RunResult:
-    """Ask the model; `max_steps` counts model calls. Tool errors go back to the model as text."""
-    state = _Run(
-        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": question}]
-    )
+    """Ask the model; `max_steps` counts model calls. Tool errors go back to the model as text.
+    The system message is `SYSTEM_PROMPT`, then the server's instructions as a second paragraph."""
+    state = _Run([])
     async with Client(server) as client:
+        system = SYSTEM_PROMPT
+        if client.instructions:
+            system += "\n\n" + client.instructions
+        state.messages.extend(
+            [{"role": "system", "content": system}, {"role": "user", "content": question}]
+        )
         listed = (await client.list_tools()).tools
         tools = mcp_tools_for_model(listed)
         names = [tool.name for tool in listed]

@@ -11,7 +11,15 @@ from tests.test_host_scorer import IDEAL
 from tgmcp import cli, config
 from tgmcp.config import Settings
 from tgmcp.gateway import NotLoggedIn
-from tgmcp.host.backends import BackendError, ModelTurn, OllamaBackend, RemoteRefused, ToolCall
+from tgmcp.host.backends import (
+    TIMED_OUT,
+    BackendError,
+    BackendUnreachable,
+    ModelTurn,
+    OllamaBackend,
+    RemoteRefused,
+    ToolCall,
+)
 from tgmcp.host.benchdata import QUESTIONS, SMOKE_IDS, build_seed
 from tgmcp.host.loop import RunResult, Step
 
@@ -167,6 +175,15 @@ def test_ask_unfinished_without_text_lists_the_calls(env, capsys, monkeypatch):
     assert lines[0] == "(unfinished after 2 steps)"
     assert lines[1].startswith("-> list_chats(")
     assert lines[2].startswith("-> get_messages(")
+
+
+def test_ask_empty_answer_is_said_and_exits_1(env, capsys, monkeypatch):
+    _backends(monkeypatch)
+    _loop(monkeypatch, RunResult("  ", [], True, [], 1.0))
+    assert cli.main(["ask", "q"]) == 1
+    out, err = capsys.readouterr()
+    assert out == "(the model returned an empty answer)\n"
+    assert err == ""
 
 
 def test_ask_show_calls_goes_to_stderr(env, capsys, monkeypatch):
@@ -373,6 +390,13 @@ def test_counts_must_be_positive(argv, capsys):
     assert "must be 1 or more" in capsys.readouterr().err
 
 
+def test_a_count_that_is_not_a_number_is_named(capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["bench", "--model", "m", "--repeat", "two"])
+    assert stop.value.code == 2
+    assert "'two' is not a whole number" in capsys.readouterr().err
+
+
 def _refuse_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     def refuse(settings: Settings) -> Any:
         raise AssertionError("Telegram must not be touched")
@@ -433,7 +457,7 @@ def test_bench_stops_when_the_backend_is_gone(no_telegram, capsys, monkeypatch):
         ) -> ModelTurn:
             calls.append(BY_TEXT[messages[1]["content"]])
             if calls[-1] != "lookup-1":
-                raise BackendError(
+                raise BackendUnreachable(
                     "Ollama is not running at http://127.0.0.1:11434; start it or pass --url."
                 )
             return await super().chat(messages, tools)
@@ -444,6 +468,22 @@ def test_bench_stops_when_the_backend_is_gone(no_telegram, capsys, monkeypatch):
     assert _total(out)[1] == "1"  # only the run that finished before the server went away
     assert calls == ["lookup-1", "lookup-1", "history-1"]  # nothing after the failure
     assert err.strip() == "Ollama is not running at http://127.0.0.1:11434; start it or pass --url."
+
+
+def test_bench_goes_on_after_a_timeout(no_telegram, capsys, monkeypatch):
+    class Slow(ScriptedBackend):
+        async def chat(
+            self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> ModelTurn:
+            if BY_TEXT[messages[1]["content"]] == "history-1":
+                raise BackendError(TIMED_OUT)
+            return await super().chat(messages, tools)
+
+    _scripted(monkeypatch, Slow())
+    assert cli.main(["bench", "--model", "m", "--set", "smoke"]) == 1
+    out, err = capsys.readouterr()
+    assert _total(out)[1:3] == ["5", "80%"]
+    assert err.strip() == TIMED_OUT
 
 
 def test_bench_json_to_a_missing_folder(no_telegram, tmp_path, capsys, monkeypatch):

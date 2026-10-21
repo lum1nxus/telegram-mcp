@@ -28,6 +28,7 @@ from tgmcp.gateway import MIGRATE, NO_TERMINAL, ApiKeyError, GatewayError, NotLo
 from tgmcp.host.backends import (
     DEFAULT_NUM_CTX,
     BackendError,
+    BackendUnreachable,
     ChatBackend,
     ModelTurn,
     OllamaBackend,
@@ -224,7 +225,7 @@ def _call_line(step: Step, *, size: bool) -> str:
 
 
 _KNOWN = (BackendError, RemoteRefused, GatewayError)
-_GONE = "is not running at"  # the backend's unreachable sentence: the bench stops
+EMPTY_ANSWER = "(the model returned an empty answer)"
 
 
 def _innermost(exc: BaseException) -> list[BaseException]:
@@ -267,6 +268,9 @@ def _ask_command(args: argparse.Namespace) -> int:
         for step in run.steps:
             _complain(_call_line(step, size=True))
     if run.finished:
+        if not (run.answer or "").strip():
+            _say(EMPTY_ANSWER)
+            return 1
         _say(run.answer or "")
         return 0
     _say(f"(unfinished after {run.turns} steps)")
@@ -286,6 +290,7 @@ class _BenchRun:
     messages: list[dict[str, Any]]
     error: str | None = None  # the exception type when the run raised
     backend_failure: str | None = None  # the sentence of a `BackendError`
+    gone: bool = False  # the backend is not running any more: the bench stops
 
     def as_json(self) -> dict[str, Any]:
         row: dict[str, Any] = {
@@ -309,7 +314,7 @@ def _bench_settings() -> Settings:
 
 class _Recorder:
     """Passes calls to the backend and keeps the loop's message list, so a run that raises
-    still errors its messages so far for the JSON log."""
+    still keeps its messages so far for the JSON log."""
 
     def __init__(self, backend: ChatBackend) -> None:
         self.backend = backend
@@ -343,7 +348,10 @@ async def _bench_one(
         failure = str(exc) if isinstance(exc, BackendError) else None
         if failure is None:
             _complain(f"{question.id} run {number}: {type(exc).__name__}")
-        return _BenchRun(question, number, zero, recorder.messages, type(exc).__name__, failure)
+        gone = isinstance(exc, BackendUnreachable)
+        return _BenchRun(
+            question, number, zero, recorder.messages, type(exc).__name__, failure, gone
+        )
     return _BenchRun(question, number, score(question, run, titles, ids), run.messages)
 
 
@@ -357,7 +365,7 @@ async def _bench(
     for question in questions:
         for number in range(1, repeat + 1):
             run = await _bench_one(question, number, backend, max_steps)
-            if run.backend_failure is not None and _GONE in run.backend_failure:
+            if run.gone:
                 return runs, run.backend_failure
             runs.append(run)
     return runs, None
@@ -435,7 +443,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _positive(text: str) -> int:
-    value = int(text)
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
     if value < 1:
         raise argparse.ArgumentTypeError("must be 1 or more")
     return value

@@ -17,7 +17,7 @@ from tgmcp.host.loop import (
     run_question,
 )
 from tgmcp.host.prompt import SYSTEM_PROMPT
-from tgmcp.server import build_server
+from tgmcp.server import INSTRUCTIONS, build_server
 
 CORRECTION = (
     "Unknown tool or malformed arguments; call one of: list_chats, get_chat, list_topics, "
@@ -72,7 +72,7 @@ async def test_happy_path(server: MCPServer) -> None:
     assert run.seconds >= 0
     first, second = backend.seen
     assert first == [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{INSTRUCTIONS}"},
         {"role": "user", "content": "Find my hiking group."},
     ]
     assert second[-1] == {
@@ -260,6 +260,21 @@ async def test_the_model_receives_the_converted_tools(server: MCPServer) -> None
         "get_messages",
         "get_message_context",
     ]
+
+
+async def test_the_system_message_carries_the_servers_instructions(server: MCPServer) -> None:
+    backend = FakeBackend([turn("done")])
+    await run_question("q", backend, server)
+    system = backend.seen[0][0]
+    assert system["role"] == "system"
+    assert system["content"].startswith(SYSTEM_PROMPT + "\n\n")
+    assert "Telegram's search matches the beginnings of words" in system["content"]
+
+
+async def test_a_server_without_instructions_leaves_the_prompt_alone() -> None:
+    backend = FakeBackend([turn("done")])
+    await run_question("q", backend, MCPServer("bare"))
+    assert backend.seen[0][0] == {"role": "system", "content": SYSTEM_PROMPT}
 
 
 def test_system_prompt() -> None:
