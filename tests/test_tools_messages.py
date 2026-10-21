@@ -70,7 +70,7 @@ async def test_long_message_is_capped_and_budget_truncates(call: Call, settings:
             ]
         },
     )
-    async with Client(build_server(lambda _s: big, settings)) as client:
+    async with Client(build_server(big, settings)) as client:
         result = await client.call_tool("get_messages", {"chat": "-2001", "limit": 100})
     data = result.structured_content or {}
     assert data["truncated"] is True
@@ -128,7 +128,7 @@ async def test_context_budget_truncates_and_small_window_does_not(
             ]
         },
     )
-    async with Client(build_server(lambda _s: big, settings)) as client:
+    async with Client(build_server(big, settings)) as client:
         result = await client.call_tool(
             "get_message_context", {"chat": "-2001", "message_id": 50, "before": 30, "after": 30}
         )
@@ -210,7 +210,7 @@ async def test_budget_is_bytes_and_the_wire_stays_near_twice_the_budget(settings
             ]
         },
     )
-    async with Client(build_server(lambda _s: cyrillic, settings)) as client:
+    async with Client(build_server(cyrillic, settings)) as client:
         page = await client.call_tool("get_messages", {"chat": "-2001", "limit": 100})
         context = await client.call_tool(
             "get_message_context", {"chat": "-2001", "message_id": 50, "before": 30, "after": 30}
@@ -248,3 +248,64 @@ async def test_blank_chat_is_refused(call: Call) -> None:
         result = await call(tool, args)
         assert result.is_error
         assert _text(result).endswith("chat must name a chat (id, @username or title).")
+
+
+async def test_limits_out_of_range_are_rejected(call: Call) -> None:
+    for tool, args in (
+        ("list_chats", {"limit": 0}),
+        ("list_chats", {"limit": 201}),
+        ("list_topics", {"chat": "-1005", "limit": 201}),
+        ("get_messages", {"chat": "-1001", "limit": 0}),
+        ("get_messages", {"chat": "-1001", "limit": 101}),
+        ("search_messages", {"query": "x", "limit": 101}),
+        ("get_message_context", {"chat": "-1001", "message_id": 5, "before": 31}),
+        ("get_message_context", {"chat": "-1001", "message_id": 5, "after": -1}),
+    ):
+        assert (await call(tool, args)).is_error, (tool, args)
+
+
+async def test_hidden_chat_is_unreachable_by_username_and_title(
+    seed: FakeGateway, settings: Settings
+) -> None:
+    hidden = settings.__class__(
+        **{**settings.__dict__, "hidden_chats": ("@autonews", "Hiking Crew")}
+    )
+    async with Client(build_server(seed, hidden)) as client:
+        for args in ({"chat": "@autonews"}, {"chat": "Hiking Crew"}, {"chat": "-1002"}):
+            result = await client.call_tool("get_messages", args)
+            assert result.is_error
+            assert "No chat matches" in _text(result)
+        listed = await client.call_tool("list_chats", {})
+    ids = [c["id"] for c in (listed.structured_content or {})["result"]]
+    assert -1003 not in ids and -1002 not in ids
+
+
+async def test_context_of_a_forum_message_stays_in_its_topic(call: Call) -> None:
+    result = await call("get_message_context", {"chat": "-1005", "message_id": 6, "after": 2})
+    data = result.structured_content or {}
+    assert data["target"]["topic_id"] == 7
+    assert data["before"] == []  # 1-5 are in the General topic
+    assert [m["id"] for m in data["after"]] == [7, 8]
+
+
+async def test_context_drops_only_from_before_when_after_is_empty(settings: Settings) -> None:
+    big = FakeGateway(
+        [make_chat(-2001, title="Big")],
+        {
+            -2001: [
+                make_message(
+                    n, chat_id=-2001, date=_NOW - timedelta(minutes=100 - n), text="y" * 1500
+                )
+                for n in range(1, 101)
+            ]
+        },
+    )
+    async with Client(build_server(big, settings)) as client:
+        result = await client.call_tool(
+            "get_message_context", {"chat": "-2001", "message_id": 100, "before": 30, "after": 30}
+        )
+    data = result.structured_content or {}
+    assert data["after"] == []
+    assert data["truncated"] is True
+    kept = [m["id"] for m in data["before"]]
+    assert kept == list(range(100 - len(kept), 100))  # the oldest went first; the nearest stay

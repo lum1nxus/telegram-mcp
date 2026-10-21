@@ -134,19 +134,25 @@ def unprotect(blob: bytes) -> bytes:
 
 
 def write_secrets(path: Path, api_hash: str, session: str) -> None:
-    """Replace the secrets file atomically, then restrict it to the owner."""
+    """Write a temporary file, restrict it to the owner, then let it replace the old file.
+
+    The ACL is set before the rename (Windows keeps a file's ACL when it is renamed), so the
+    secrets file never exists with the folder's inherited permissions, and a failed icacls
+    leaves the old file as it was.
+    """
     payload = json.dumps({"v": VERSION, "api_hash": api_hash, "session": session})
     blob = protect(payload.encode("utf-8"))
     temp = path.with_name(path.name + ".tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
     try:
+        # 0o600 is for the other platforms; Windows only reads its read-only bit.
         with os.fdopen(os.open(temp, flags, 0o600), "wb") as out:
             out.write(blob)
+        config.restrict_to_owner(temp)
         os.replace(temp, path)
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
-    config.restrict_to_owner(path)
 
 
 def read_secrets(path: Path) -> Secrets:

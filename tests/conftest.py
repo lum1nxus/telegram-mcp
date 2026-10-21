@@ -89,7 +89,7 @@ def make_client(seed: FakeGateway, settings: Settings) -> Callable[[], Client]:
     context to exit in the task that entered it, and pytest runs teardown elsewhere.
     Tests use the `call` fixture or enter a client themselves.
     """
-    return lambda: Client(build_server(lambda _s: seed, settings))
+    return lambda: Client(build_server(seed, settings))
 
 
 @pytest.fixture

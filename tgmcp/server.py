@@ -210,10 +210,9 @@ def _fit_context(
     return Context(chat=chat, target=target, before=before, after=after, truncated=dropped)
 
 
-def build_server(gateway_factory: Callable[[Settings], Gateway], settings: Settings) -> MCPServer:
+def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
     @asynccontextmanager
     async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
-        gateway = gateway_factory(settings)
         try:
             yield AppContext(gateway, Directory(gateway, settings.hidden_chats))
         finally:

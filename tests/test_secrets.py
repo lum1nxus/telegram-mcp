@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,7 +45,7 @@ def test_failed_write_leaves_no_temporary_file(tmp_path: Path, monkeypatch):
     def broken(src: object, dst: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(secrets.os, "replace", broken)
+    monkeypatch.setattr(os, "replace", broken)
     with pytest.raises(OSError):
         secrets.write_secrets(tmp_path / "secrets.bin", HASH, SESSION)
     assert list(tmp_path.iterdir()) == []
@@ -65,7 +67,22 @@ def test_write_secrets_round_trip_without_clear_text(tmp_path: Path, _no_icacls:
         assert HASH.encode() not in raw
         assert SESSION.encode() not in raw
     assert secrets.read_secrets(path) == secrets.Secrets(api_hash=HASH, session=SESSION)
-    assert _no_icacls == [path]
+    assert _no_icacls == [path.with_name("secrets.bin.tmp")]  # restricted before the rename
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["secrets.bin"]
+
+
+def test_failed_restriction_keeps_the_old_file(tmp_path: Path, monkeypatch):
+    path = tmp_path / "secrets.bin"
+    secrets.write_secrets(path, HASH, SESSION)
+    old = path.read_bytes()
+
+    def icacls_fails(target: Path) -> None:
+        raise subprocess.CalledProcessError(1, ["icacls", str(target)])
+
+    monkeypatch.setattr(config, "restrict_to_owner", icacls_fails)
+    with pytest.raises(subprocess.CalledProcessError):
+        secrets.write_secrets(path, "other-hash", "other-session")
+    assert path.read_bytes() == old
     assert sorted(p.name for p in tmp_path.iterdir()) == ["secrets.bin"]
 
 

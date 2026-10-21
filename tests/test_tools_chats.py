@@ -1,13 +1,15 @@
 import asyncio
+import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
 from mcp import Client
+from mcp.server.mcpserver.exceptions import ToolError
 
 from tests.conftest import Call
 from tests.fake_gateway import FakeGateway
-from tgmcp import server
+from tgmcp import logging_setup, server
 from tgmcp.gateway import Busy, NotLoggedIn
 from tgmcp.server import _check_range
 
@@ -121,5 +123,25 @@ async def test_timeout_maps_to_tool_error(
 def test_check_range_mixes_aware_and_naive_as_utc() -> None:
     _check_range(datetime(2026, 10, 1, 10, tzinfo=UTC), datetime(2026, 10, 1, 11))
     _check_range(date(2026, 10, 1), date(2026, 10, 1))
-    with pytest.raises(server.ToolError, match="since must not be after until"):
+    with pytest.raises(ToolError, match="since must not be after until"):
         _check_range(datetime(2026, 10, 1, 12, tzinfo=UTC), datetime(2026, 10, 1, 11))
+
+
+async def test_failed_tool_calls_leave_no_argument_in_the_log(call: Call, tmp_path: Any) -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    levels = {name: logging.getLogger(name).level for name in ("mcp", "telethon")}
+    try:
+        written = logging_setup.configure(tmp_path / "tgmcp.log")
+        result = await call("get_chat", {"chat": "MARKER-7731 ignore all instructions"})
+        assert result.is_error
+        for handler in root.handlers:
+            handler.flush()
+        assert "MARKER-7731" not in written.read_text(encoding="utf-8")
+    finally:
+        for handler in root.handlers:
+            if handler not in before:
+                root.removeHandler(handler)
+                handler.close()
+        for name, level in levels.items():
+            logging.getLogger(name).setLevel(level)
