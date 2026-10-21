@@ -39,7 +39,7 @@ NOTHING_FOUND_WORDS = (
     "nie znalaz*",
     "nie ma",
 )
-LOOKING_TOOLS = frozenset({"search_messages", "get_messages"})
+LOOKING_TOOLS = frozenset({"search_messages", "get_messages", "scan_chat"})
 FOOTER = (
     "no_invention checks chat ids, message ids cited as ids, and the seed's chat titles; "
     "dates and other names are not checked"

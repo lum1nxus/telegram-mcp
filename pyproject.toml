@@ -51,6 +51,8 @@ max-args = 6
 "check.py" = ["T20"]
 "tgmcp/expand.py" = ["RUF001", "RUF002", "RUF003"]  # Cyrillic word lists and examples
 "tests/test_expand.py" = ["RUF001", "RUF003"]  # Cyrillic queries
+"tgmcp/match.py" = ["RUF001", "RUF002", "RUF003"]  # Cyrillic examples (ё, е)
+"tests/test_match.py" = ["RUF001", "RUF003"]  # Cyrillic queries and texts
 "tgmcp/cli.py" = ["T20"]
 
 [tool.mypy]

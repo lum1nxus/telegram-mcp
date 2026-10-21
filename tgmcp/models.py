@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 Kind = Literal["user", "group", "channel"]
 MediaKind = Literal["photo", "document", "voice", "video", "sticker", "other"]
+ScanMode = Literal["fragment", "words", "regex"]
+StoppedBy = Literal["max_messages", "since", "start", "time", "flood", "limit"]
 
 TEXT_CAP = 2000
 # Bytes of compact UTF-8 JSON. mcp sends a result twice (structured content and a pretty-printed
@@ -75,6 +77,24 @@ class SearchResult(BaseModel):
     truncated: bool
     note: str
     queries_tried: list[QueryTried] = []  # in cascade order; empty when expand=False
+
+
+class ScanResult(BaseModel):
+    """What `scan_chat` covered and found; `note` restates the coverage in one sentence."""
+
+    chat: Chat
+    query: str
+    mode: ScanMode
+    tolerance: int
+    scanned: int  # messages matched: the chat's plain messages, not only the sender's
+    oldest_scanned: datetime | None
+    newest_scanned: datetime | None
+    reached_start: bool
+    stopped_by: StoppedBy
+    elapsed_s: float
+    hits: list[Message]  # newest first
+    truncated: bool
+    note: str
 
 
 class Page(BaseModel):

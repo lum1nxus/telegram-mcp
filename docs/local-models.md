@@ -69,7 +69,7 @@ If the model does not finish within the steps, or makes two broken tool calls in
 
 ## Which model works best: `tgmcp bench`
 
-`tgmcp bench` asks a model 35 fixed questions about an invented account built into tgmcp (no login, none of your chats) and checks the answers with fixed rules, not with another model.
+`tgmcp bench` asks a model 39 fixed questions about an invented account built into tgmcp (no login, none of your chats) and checks the answers with fixed rules, not with another model.
 
 ```
 tgmcp bench --model gemma4:12b
@@ -81,7 +81,7 @@ Options: `--model` (required), `--backend`, `--url` and `--think` as for `ask`; 
 
 The first line names the run: `model=… backend=… ctx=… think=… repeat=…` (with LM Studio, `ctx=app think=n/a`, because LM Studio sets both itself). Compare only runs with the same `ctx`, `think` and `repeat`.
 
-Then one row per kind of question that was run (`lookup`, `history`, `paging`, `context`, `topic`, `hidden`, `refusal`, `multilingual`, `search`) and a `total` row. The columns:
+Then one row per kind of question that was run (`lookup`, `history`, `paging`, `context`, `topic`, `hidden`, `refusal`, `multilingual`, `search`, `scan`) and a `total` row. The columns:
 
 | Column | Meaning |
 |---|---|

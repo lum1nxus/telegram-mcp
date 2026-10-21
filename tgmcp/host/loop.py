@@ -1,4 +1,4 @@
-"""The agent loop: a local model answers one question through the six read-only tools.
+"""The agent loop: a local model answers one question through the seven read-only tools.
 
 The loop talks to the tools through the MCP SDK's in-process `Client`, so the model sees what
 Claude Code sees: the same tool listings and results, and the server's instructions after the

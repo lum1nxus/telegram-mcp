@@ -703,8 +703,10 @@ async def test_search_timeout_suggests_dropping_expand(
     result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
     assert result.is_error
     assert _text(result).endswith(
-        "search_messages took longer than 30 seconds; try a smaller limit, or drop expand=true."
+        "search_messages took longer than 0.01 seconds; try a smaller limit, or drop expand=true."
     )
     monkeypatch.setattr(seed, "history", slow)
     result = await call("get_messages", {"chat": "Garden Club"})
-    assert _text(result).endswith("get_messages took longer than 30 seconds; try a smaller limit.")
+    assert _text(result).endswith(
+        "get_messages took longer than 0.01 seconds; try a smaller limit."
+    )
