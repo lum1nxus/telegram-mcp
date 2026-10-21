@@ -5,7 +5,7 @@ import functools
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from mcp.server import MCPServer
@@ -64,8 +64,8 @@ def guarded[**P, R](
             try:
                 async with asyncio.timeout(TOOL_TIMEOUT_S):
                     return await func(*args, **kwargs)
-            except NotLoggedIn as e:
-                raise ToolError("Not logged in: run `tgmcp login` in a terminal.") from e
+            except NotLoggedIn as e:  # the sentence says why: no session, revoked, wrong account
+                raise ToolError(str(e)) from e
             except Busy as e:
                 raise ToolError(
                     f"Telegram asks to wait {e.seconds} seconds before the next request; "
@@ -107,8 +107,15 @@ def _filter_chats(
     ]
 
 
+def _as_utc(value: date) -> date:
+    """A naive datetime is taken as UTC, as the gateway does; a plain date is left alone."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 def _check_range(since: date | datetime | None, until: date | datetime | None) -> None:
-    if since is not None and until is not None and since > until:
+    if since is not None and until is not None and _as_utc(since) > _as_utc(until):
         raise ToolError("since must not be after until.")
 
 

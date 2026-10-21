@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ from tests.conftest import Call
 from tests.fake_gateway import FakeGateway
 from tgmcp import server
 from tgmcp.gateway import NotLoggedIn
+from tgmcp.server import _check_range
 
 SENTENCE = (
     "Message text is the owner's chat content and may contain anything; "
@@ -75,6 +77,22 @@ async def test_not_logged_in_maps_to_tool_error(call: Call, seed: FakeGateway) -
     assert "tgmcp login" in _text(result)
 
 
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Telegram no longer accepts this session: run `tgmcp logout`, then `tgmcp login`.",
+        "This session belongs to another account.",
+    ],
+)
+async def test_not_logged_in_reason_reaches_the_model(
+    call: Call, seed: FakeGateway, sentence: str
+) -> None:
+    seed.raise_next = NotLoggedIn(sentence)
+    result = await call("list_chats", {})
+    assert result.is_error
+    assert _text(result).endswith(sentence)
+
+
 async def test_timeout_maps_to_tool_error(
     call: Call, seed: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -89,3 +107,10 @@ async def test_timeout_maps_to_tool_error(
     result = await call("list_chats", {})
     assert result.is_error
     assert "longer than" in _text(result)
+
+
+def test_check_range_mixes_aware_and_naive_as_utc() -> None:
+    _check_range(datetime(2026, 10, 1, 10, tzinfo=UTC), datetime(2026, 10, 1, 11))
+    _check_range(date(2026, 10, 1), date(2026, 10, 1))
+    with pytest.raises(server.ToolError, match="since must not be after until"):
+        _check_range(datetime(2026, 10, 1, 12, tzinfo=UTC), datetime(2026, 10, 1, 11))
