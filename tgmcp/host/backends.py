@@ -38,9 +38,9 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
-class Reply:
+class ModelTurn:
     text: str
-    tool_calls: list[ToolCall]
+    tool_calls: tuple[ToolCall, ...]
     raw: dict[str, Any]
 
 
@@ -48,7 +48,9 @@ class ChatBackend(Protocol):
     name: str
     model: str
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Reply: ...
+    async def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> ModelTurn: ...
 
     async def check_model(self) -> None: ...
 
@@ -159,7 +161,7 @@ class OllamaBackend(_Base):
     def _missing(self, model: str) -> str:
         return f"Model {model} is not installed; run `ollama pull {model}`."
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Reply:
+    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelTurn:
         raw = await self._http(
             "POST",
             "/api/chat",
@@ -182,7 +184,7 @@ class OllamaBackend(_Base):
             if not isinstance(arguments, dict):
                 arguments = {"_malformed": json.dumps(arguments, ensure_ascii=False)}
             calls.append(ToolCall(f"call_{index}", str(function.get("name", "")), arguments))
-        return Reply(str(message.get("content") or ""), calls, raw)
+        return ModelTurn(str(message.get("content") or ""), tuple(calls), raw)
 
     async def check_model(self) -> None:
         if self.model.endswith("-cloud"):
@@ -218,7 +220,7 @@ class OpenAICompatBackend(_Base):
     def _missing(self, model: str) -> str:
         return f"Model {model} is not loaded in LM Studio; load it there."
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Reply:
+    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelTurn:
         raw = await self._http(
             "POST",
             "/v1/chat/completions",
@@ -238,7 +240,7 @@ class OpenAICompatBackend(_Base):
                     _parse_arguments(function.get("arguments")),
                 )
             )
-        return Reply(str(message.get("content") or ""), calls, raw)
+        return ModelTurn(str(message.get("content") or ""), tuple(calls), raw)
 
     async def check_model(self) -> None:
         listed = await self._http("GET", "/v1/models")
