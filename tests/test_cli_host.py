@@ -11,7 +11,7 @@ from tests.test_host_scorer import IDEAL
 from tgmcp import cli, config
 from tgmcp.config import Settings
 from tgmcp.gateway import NotLoggedIn
-from tgmcp.host.backends import BackendError, ModelTurn, ToolCall
+from tgmcp.host.backends import BackendError, ModelTurn, RemoteRefused, ToolCall
 from tgmcp.host.benchdata import QUESTIONS, SMOKE_IDS, build_seed
 from tgmcp.host.loop import RunResult, Step
 
@@ -150,8 +150,8 @@ def test_ask_model_from_config_then_env(env, capsys, monkeypatch):
 
 def test_ask_unfinished_prints_the_last_text_and_exits_1(env, capsys, monkeypatch):
     _backends(monkeypatch)
-    steps = [_step("get_messages") for _ in range(8)]
-    _loop(monkeypatch, RunResult("Partial: 120 and 119.", steps, False, [], 1.0))
+    steps = [_step("get_messages") for _ in range(11)]  # several calls in some turns
+    _loop(monkeypatch, RunResult("Partial: 120 and 119.", steps, False, [], 1.0, turns=8))
     assert cli.main(["ask", "q"]) == 1
     out, err = capsys.readouterr()
     assert out == "(unfinished after 8 steps)\nPartial: 120 and 119.\n"
@@ -160,7 +160,8 @@ def test_ask_unfinished_prints_the_last_text_and_exits_1(env, capsys, monkeypatc
 
 def test_ask_unfinished_without_text_lists_the_calls(env, capsys, monkeypatch):
     _backends(monkeypatch)
-    _loop(monkeypatch, RunResult(None, [_step("list_chats"), _step("get_messages")], False, [], 1))
+    steps = [_step("list_chats"), _step("get_messages")]
+    _loop(monkeypatch, RunResult(None, steps, False, [], 1, turns=2))
     assert cli.main(["ask", "q"]) == 1
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "(unfinished after 2 steps)"
@@ -314,13 +315,13 @@ def test_bench_backend_error_during_a_run_is_reported_and_exits_1(no_telegram, c
         async def chat(
             self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
         ) -> ModelTurn:
-            raise BackendError("Ollama is not running at http://127.0.0.1:11434; start it.")
+            raise BackendError("Ollama returned an answer tgmcp cannot read.")
 
     _scripted(monkeypatch, Dying())
     assert cli.main(["bench", "--model", "m", "--set", "smoke"]) == 1
     out, err = capsys.readouterr()
     assert _total(out)[1:3] == ["5", "0%"]
-    assert "Ollama is not running" in err
+    assert err.strip() == "Ollama returned an answer tgmcp cannot read."
 
 
 def test_bench_refuses_a_remote_url(no_telegram, capsys):
@@ -350,3 +351,117 @@ def test_counts_must_be_positive(argv, capsys):
         cli.main(argv)
     assert stop.value.code == 2
     assert "must be 1 or more" in capsys.readouterr().err
+
+
+def _refuse_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(settings: Settings) -> Any:
+        raise AssertionError("Telegram must not be touched")
+
+    monkeypatch.setattr(cli, "factory", refuse)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RemoteRefused("Model x-cloud is served from the cloud, not from this computer."),
+        BackendError("Model x is not installed; run `ollama pull x`."),
+    ],
+)
+def test_ask_checks_the_model_before_touching_telegram(env, capsys, monkeypatch, error):
+    _refuse_factory(monkeypatch)
+    _backends(monkeypatch, fail=error)
+    assert cli.main(["ask", "q", "--model", "x"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.strip() == str(error)
+
+
+@pytest.mark.parametrize("command", [["ask", "q"], ["bench", "--model", "m"]])
+def test_think_with_lmstudio_is_refused(env, capsys, monkeypatch, command):
+    _refuse_factory(monkeypatch)
+    assert cli.main([*command, "--backend", "lmstudio", "--think"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.strip() == "--think is only available with --backend ollama."
+
+
+def test_bench_crash_is_reported_and_keeps_the_messages_so_far(
+    no_telegram, tmp_path, capsys, monkeypatch
+):
+    class CrashOnSecondTurn(ScriptedBackend):
+        async def chat(
+            self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> ModelTurn:
+            if BY_TEXT[messages[1]["content"]] == "paging-1" and len(messages) > 2:
+                raise ValueError("boom")
+            return await super().chat(messages, tools)
+
+    _scripted(monkeypatch, CrashOnSecondTurn())
+    path = tmp_path / "log.json"
+    assert cli.main(["bench", "--model", "m", "--set", "smoke", "--json", str(path)]) == 0
+    assert capsys.readouterr().err.splitlines() == ["paging-1 run 1: ValueError"]
+    crashed = next(r for r in json.loads(path.read_text(encoding="utf-8")) if r["id"] == "paging-1")
+    assert [m["role"] for m in crashed["messages"]] == ["system", "user", "assistant", "tool"]
+
+
+def test_bench_stops_when_the_backend_is_gone(no_telegram, capsys, monkeypatch):
+    calls: list[str] = []
+
+    class Gone(ScriptedBackend):
+        async def chat(
+            self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> ModelTurn:
+            calls.append(BY_TEXT[messages[1]["content"]])
+            if calls[-1] != "lookup-1":
+                raise BackendError(
+                    "Ollama is not running at http://127.0.0.1:11434; start it or pass --url."
+                )
+            return await super().chat(messages, tools)
+
+    _scripted(monkeypatch, Gone())
+    assert cli.main(["bench", "--model", "m", "--set", "smoke"]) == 1
+    out, err = capsys.readouterr()
+    assert _total(out)[1] == "1"  # only the run that finished before the server went away
+    assert calls == ["lookup-1", "lookup-1", "history-1"]  # nothing after the failure
+    assert err.strip() == "Ollama is not running at http://127.0.0.1:11434; start it or pass --url."
+
+
+def test_bench_json_to_a_missing_folder(no_telegram, tmp_path, capsys, monkeypatch):
+    _scripted(monkeypatch, ScriptedBackend())
+    path = tmp_path / "missing" / "log.json"
+    assert cli.main(["bench", "--model", "m", "--set", "smoke", "--json", str(path)]) == 1
+    out, err = capsys.readouterr()
+    assert _total(out)[1] == "5"
+    assert err.startswith(f"Cannot write {path}: ")
+    assert err.strip().endswith(".")
+    assert len(err.strip().splitlines()) == 1
+
+
+def test_first_cause_unwraps_one_leaf_and_known_groups() -> None:
+    leaf = BackendError("x")
+    assert cli._first_cause(ExceptionGroup("g", [ExceptionGroup("h", [leaf])])) is leaf
+    known = ExceptionGroup("g", [leaf, RemoteRefused("y")])
+    assert cli._first_cause(known) is leaf
+    mixed = ExceptionGroup("g", [leaf, ValueError("z")])
+    assert cli._first_cause(mixed) is mixed
+
+
+def test_ask_reraises_a_mixed_group(env, monkeypatch):
+    mixed = ExceptionGroup("g", [BackendError("x"), ValueError("z")])
+
+    async def run(question: str, backend: Any, server: Any, *, max_steps: int) -> RunResult:
+        raise mixed
+
+    _backends(monkeypatch)
+    monkeypatch.setattr(cli, "run_question", run)
+    with pytest.raises(ExceptionGroup) as raised:
+        cli.main(["ask", "q"])
+    assert raised.value is mixed
+
+
+def test_ctrl_c_inside_a_task_group_exits_130(env, capsys, monkeypatch):
+    def interrupted(args: Any) -> int:
+        raise BaseExceptionGroup("g", [KeyboardInterrupt()])
+
+    monkeypatch.setattr(cli, "_ask_command", interrupted)
+    assert cli.main(["ask", "q"]) == 130

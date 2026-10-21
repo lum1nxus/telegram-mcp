@@ -324,4 +324,6 @@ def make_backend(
 ) -> ChatBackend:
     if kind == "ollama":
         return OllamaBackend(model or "", url or OLLAMA_URL, think=think)
+    if think:
+        raise BackendError("--think is only available with --backend ollama.")
     return OpenAICompatBackend(model or "", url or LMSTUDIO_URL)

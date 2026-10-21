@@ -458,3 +458,8 @@ def test_assistant_message_drops_reasoning_and_the_think_span() -> None:
     opener = Opener({"POST /v1/chat/completions": _completion(openai_message)})
     turn = asyncio.run(OpenAICompatBackend("m", opener=opener).chat([], TOOLS))
     assert turn.assistant_message == {"role": "assistant", "content": "ok"}
+
+
+def test_think_is_only_for_ollama() -> None:
+    with pytest.raises(BackendError, match=r"--think is only available with --backend ollama\."):
+        make_backend("lmstudio", None, None, think=True)
