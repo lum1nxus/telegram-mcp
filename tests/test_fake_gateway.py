@@ -16,9 +16,9 @@ async def test_search_matches_word_prefixes_not_fragments(seed):
 
 async def test_search_needs_every_word(seed):
     both = await seed.search_global("granite pea", since=None, until=None, limit=10)
-    assert [m.id for m in both] == [50]
+    assert [m.id for m in both.messages] == [50]
     mixed = await seed.search_global("granite ridge", since=None, until=None, limit=10)
-    assert mixed == []
+    assert mixed.messages == []
 
 
 async def test_history_before_id_is_newest_first(seed):
@@ -62,17 +62,17 @@ async def test_empty_query_returns_everything_newest_first(seed):
     assert [m.id for m in hits] == [120, 119, 118]
 
 
-async def test_sender_must_have_been_seen(seed):
+async def test_sender_must_be_a_dialog_user(seed):
     with pytest.raises(GatewayError) as caught:
         await seed.search_in_chat(
             -1001, "", topic=None, sender="333", since=None, until=None, limit=5
         )
-    assert str(caught.value) == UNSEEN_USER
-    await seed.history(-1001, topic=None, before_id=None, since=None, until=None, limit=5)
+    assert str(caught.value) == UNSEEN_USER  # Ben writes in the group but is no dialog
+    seed.messages[-1001][0] = seed.messages[-1001][0].model_copy(update={"sender_id": 111})
     hits = await seed.search_in_chat(
-        -1001, "", topic=None, sender="333", since=None, until=None, limit=2
+        -1001, "", topic=None, sender="111", since=None, until=None, limit=2
     )
-    assert {m.sender_id for m in hits} == {333}
+    assert [m.id for m in hits] == [1]
 
 
 async def test_history_until_is_exclusive(seed):

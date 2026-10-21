@@ -32,11 +32,13 @@ In **cmd.exe** write the paths with backslashes: `.venv\Scripts\tgmcp login`. Th
 
 ### How read-only is enforced
 
-Three layers, so the promise does not rest on good intentions:
+Three layers. What they promise, and what they do not:
 
-1. **At run time.** tgmcp talks to Telegram through `ReadOnlyClient`, a Telethon client that checks every request before it leaves the computer against a short list of reading requests (list dialogs, read history, search, read a channel's details and a forum's topics, plus what connecting needs). Anything else, however it was built, is refused and nothing is sent. `tgmcp login` and `tgmcp logout` use a second client whose list holds only the sign-in requests and the log-out.
+1. **At run time.** tgmcp talks to Telegram through `ReadOnlyClient`, a Telethon client that checks every request before it leaves the computer against a short list of reading requests (list dialogs, read history, search, read a channel's details and a forum's topics, plus what connecting needs). Every write that goes through the client is refused and nothing is sent: tgmcp's own calls, Telethon's helper methods and the methods of returned objects (a message's `reply` or `delete`). `tgmcp login` and `tgmcp logout` use a second client whose list holds only the sign-in requests and the log-out.
 2. **In the source.** A test reads every module of the package and fails on write-shaped names (`send`, `delete`, `reply`, `download`, ...), on dynamic tricks that could hide a call (`eval`, `vars`, computed `getattr`, ...), and on any Telethon name inside `tgmcp/telegram/` that is not on an explicit list.
-3. **The contract test** also sends the forbidden requests to the real client class (without a network) and checks that each one is refused, including the ones reached through a returned message (`reply`, `delete`, `mark as read`).
+3. **The contract test** also sends the forbidden requests to the real client class (without a network) and checks that each one is refused, including the ones reached through a returned message (`reply`, `delete`, `mark as read`). Code inside this package that deliberately tries to get round the guard (replacing its list, forging a request) is caught by this test and by review, not by the guard itself.
+
+Out of scope: a modified copy of tgmcp or a patched Telethon. You run the code you install, so install it only from this repository (see [SECURITY.md](SECURITY.md)).
 
 ## First run
 
@@ -114,15 +116,15 @@ Every tool is read-only and does not reach beyond your account (annotations: rea
 | `list_chats` | `query` (none), `kind` (none: user, group or channel), `include_archived` (false), `limit` (50, 1 to 200) |
 | `get_chat` | `chat` (id, @username, title or part of it) |
 | `list_topics` | `chat`, `limit` (100, 1 to 200) |
-| `search_messages` | `query` (not empty), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none: a user id or @username tgmcp has already seen, for example a `sender_id` from `get_messages`; needs `chat`), `since` (none, a date), `until` (none, a date), `limit` (30, 1 to 100) |
+| `search_messages` | `query` (not empty), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none: a user id or @username from your dialog list, see below; needs `chat`), `since` (none, a date), `until` (none, a date), `limit` (30, 1 to 100) |
 | `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time, not included), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10, 0 to 30), `after` (10, 0 to 30) |
 
 Dates and times are UTC: `since` and `until` of `search_messages` are whole UTC days (both included), and a date and time without a time zone in `get_messages` is taken as UTC. If you live east of Greenwich, a message sent just after your local midnight belongs to the previous UTC day.
 
-Answers are kept small: a message text is cut at 2 000 characters (`get_message_context` with `before=0, after=0` returns it in full), and a result stops at about 30 KB, with `truncated: true` and, for `get_messages`, a `next_before_id` to continue. `get_messages` also says `truncated` when it stopped early in a long run of service messages (joins, pins); the cursor then continues below them.
+Answers are kept small: a message text is cut at 2 000 characters (`get_message_context` with `before=0, after=0` returns it in full), and a result stops at about 30 KB, with `truncated: true` and, for `get_messages`, a `next_before_id` to continue. `get_messages` also says `truncated` when it stopped early in a long run of service messages (joins, pins); the cursor then continues below them, and a search across all chats says `truncated` in the same case. `list_chats` and `list_topics` stop at about 25 KB too (narrow them with `query` or `kind`).
 
-`sender` only accepts people tgmcp has already seen in this session: someone in your chat list, or the author of a message a tool has returned. It never looks a name up on Telegram's servers, because that lookup is one of the requests Telegram limits most strictly.
+`sender` is reliable only for users of your dialog list (people you have a private chat with). A member of a large group or a channel is usually not found, even after their messages were read, because Telegram sends such users without the details tgmcp would need; the tool then says "Unknown sender", and searching without `sender` is the way round. tgmcp never looks a name up on Telegram's servers, because that lookup is one of the requests Telegram limits most strictly.
 
 ## Search semantics
 

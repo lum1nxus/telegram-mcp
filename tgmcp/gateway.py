@@ -34,8 +34,7 @@ MIGRATE = (
 
 NO_TERMINAL = "No terminal input: run `tgmcp login` in an interactive terminal."
 UNSEEN_USER = (
-    "Unknown sender: pass a sender_id seen in this chat's messages (get_messages) "
-    "or the @username of a user in your chats."
+    "Unknown sender: only users from your dialog list can be named; try searching without `sender`."
 )
 
 
@@ -65,6 +64,14 @@ class History:
 
     messages: list[Message]
     next_before_id: int | None
+    stopped_early: bool = False
+
+
+@dataclass(frozen=True)
+class Hits:
+    """Global search hits, newest first; `stopped_early` as in `History`."""
+
+    messages: list[Message]
     stopped_early: bool = False
 
 
@@ -110,7 +117,7 @@ class Gateway(Protocol):
 
     async def search_global(
         self, query: str, *, since: date | None, until: date | None, limit: int
-    ) -> list[Message]: ...
+    ) -> Hits: ...
 
     async def around(
         self, chat_id: int, message_id: int, *, before: int, after: int

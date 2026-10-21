@@ -4,10 +4,10 @@ from typing import Any
 from mcp import Client
 
 from tests.conftest import _NOW, Call
-from tests.factories import make_chat, make_message
+from tests.factories import make_chat, make_message, make_topic
 from tests.fake_gateway import FakeGateway
 from tgmcp.config import Settings
-from tgmcp.gateway import History
+from tgmcp.gateway import History, Hits
 from tgmcp.models import RESULT_BUDGET, SEARCH_NOTE
 from tgmcp.server import build_server
 
@@ -248,6 +248,37 @@ async def test_blank_chat_is_refused(call: Call) -> None:
         result = await call(tool, args)
         assert result.is_error
         assert _text(result).endswith("chat must name a chat (id, @username or title).")
+
+
+async def test_global_search_cut_short_by_service_messages_is_truncated(
+    call: Call, seed: FakeGateway, monkeypatch: Any
+) -> None:
+    async def short(query: str, **_kw: Any) -> Hits:
+        return Hits([seed.messages[-1001][49]], stopped_early=True)
+
+    monkeypatch.setattr(seed, "search_global", short)
+    result = await call("search_messages", {"query": "granite", "limit": 5})
+    data = result.structured_content or {}
+    assert ([h["id"] for h in data["hits"]], data["truncated"]) == ([50], True)
+
+
+async def test_list_chats_and_topics_stay_in_the_budget(settings: Settings) -> None:
+    many = FakeGateway(
+        [make_chat(-5000 - n, title=f"Chat {n} " + "t" * 200) for n in range(400)],
+        {},
+        {-5000: [make_topic(n, title="u" * 250) for n in range(1, 201)]},
+    )
+    many.chats[0] = many.chats[0].model_copy(update={"is_forum": True})
+    async with Client(build_server(many, settings)) as client:
+        chats = await client.call_tool("list_chats", {"limit": 200})
+        topics = await client.call_tool("list_topics", {"chat": "-5000", "limit": 200})
+    for result in (chats, topics):
+        assert not result.is_error
+        listed = (result.structured_content or {})["result"]
+        assert 0 < len(listed) < 200
+        assert (
+            len(result.model_dump_json(by_alias=True).encode("utf-8")) <= 2 * RESULT_BUDGET + 4_000
+        )
 
 
 async def test_limits_out_of_range_are_rejected(call: Call) -> None:

@@ -17,6 +17,7 @@ from pydantic import Field
 from tgmcp.config import Settings
 from tgmcp.gateway import Gateway, GatewayError, as_utc
 from tgmcp.models import (
+    LIST_BUDGET,
     RESULT_BUDGET,
     SEARCH_NOTE,
     Chat,
@@ -143,8 +144,8 @@ async def _search(  # noqa: PLR0913, PLR0917 - mirrors the tool signature
         scope = "all chats"
         found = await app.gateway.search_global(query, since=since, until=until, limit=limit)
         visible = {c.id for c in await app.directory.chats()}
-        hits = [m for m in found if m.chat_id in visible]
-        full = len(found) == limit
+        hits = [m for m in found.messages if m.chat_id in visible]
+        full = len(found.messages) == limit or found.stopped_early
     else:
         target = await _resolve(app, chat)
         _check_topic(target, topic)
@@ -241,7 +242,10 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         limit: Annotated[int, Field(ge=1, le=200)] = 50,
     ) -> list[Chat]:
         chats = await _app(ctx).directory.chats()
-        return _filter_chats(chats, query, kind, include_archived)[:limit]
+        kept, _ = fit_budget(
+            _filter_chats(chats, query, kind, include_archived)[:limit], LIST_BUDGET
+        )
+        return kept
 
     @mcp.tool(
         name="get_chat",
@@ -273,7 +277,8 @@ def build_server(gateway: Gateway, settings: Settings) -> MCPServer:
         found = await _resolve(app, chat)
         if not found.is_forum:
             raise _not_a_forum(found)
-        return await app.gateway.topics(found.id, limit)
+        kept, _ = fit_budget(await app.gateway.topics(found.id, limit), LIST_BUDGET)
+        return kept
 
     @mcp.tool(
         name="search_messages",
