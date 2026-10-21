@@ -44,9 +44,13 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class ModelTurn:
+    """One model answer. `assistant_message` is the backend's own assistant message, in its
+    dialect, so the loop can hand it back unchanged on the next call."""
+
     text: str
     tool_calls: tuple[ToolCall, ...]
     raw: dict[str, Any]
+    assistant_message: dict[str, Any] | None = None
 
 
 class ChatBackend(Protocol):
@@ -191,7 +195,7 @@ class OllamaBackend(_Base):
         if not isinstance(message, dict):
             raise BackendError(_UNREADABLE.format(name="Ollama"))
         calls = _tool_calls(message.get("tool_calls"), "Ollama", ids=False)
-        return ModelTurn(_text(message), calls, raw)
+        return ModelTurn(_text(message), calls, raw, message)
 
     async def check_model(self) -> None:
         if self.model.endswith("-cloud"):
@@ -242,7 +246,7 @@ class OpenAICompatBackend(_Base):
         if not isinstance(message, dict):
             raise BackendError(_UNREADABLE.format(name="LM Studio"))
         calls = _tool_calls(message.get("tool_calls"), "LM Studio", ids=True)
-        return ModelTurn(_text(message), calls, raw)
+        return ModelTurn(_text(message), calls, raw, message)
 
     async def check_model(self) -> None:
         listed = await self._http("GET", "/v1/models")
