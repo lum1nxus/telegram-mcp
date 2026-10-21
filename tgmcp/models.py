@@ -20,6 +20,9 @@ SEARCH_NOTE = (
     "Telegram's search matches the beginnings of words, not fragments: "
     "'market' finds 'marketing' but not 'supermarket'. Rephrase before concluding there is nothing."
 )
+# Appended to SEARCH_NOTE when the cascade tried queries and none of them found anything.
+NOTHING_FOR_QUERIES = "Nothing found for any of the {n} queries tried; see queries_tried."
+NOTHING_FOR_ONE_QUERY = "Nothing found for the 1 query tried; see queries_tried."
 
 
 class Chat(BaseModel):
@@ -56,14 +59,22 @@ class Message(BaseModel):
     link: str | None = None
 
 
-class SearchResult(BaseModel):
+class QueryTried(BaseModel):
+    """One Telegram query of the search cascade and its hits (hidden chats not counted)."""
+
     query: str
+    hits: int
+
+
+class SearchResult(BaseModel):
+    query: str  # as the caller wrote it; the queries actually sent are in `queries_tried`
     scope: str
     since: date | None
     until: date | None
     hits: list[Message]
     truncated: bool
     note: str
+    queries_tried: list[QueryTried] = []  # in cascade order; empty when expand=False
 
 
 class Page(BaseModel):

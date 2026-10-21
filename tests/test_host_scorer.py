@@ -22,6 +22,7 @@ CATEGORIES = (
     "hidden",
     "refusal",
     "multilingual",
+    "search",
 )
 SEED = build_seed()
 TITLES = {chat.title for chat in SEED.chats}
@@ -236,7 +237,7 @@ def test_no_invention_true_when_cited_id_and_title_are_in_results() -> None:
 
 def test_no_invention_false_for_an_id_not_in_results() -> None:
     results = step("list_chats", '[{"id":-1001,"title":"Hiking Club"}]')
-    result = score(question(), run("Hiking Club is -1009.", results), TITLES, IDS)
+    result = score(question(), run("Hiking Club is -1099.", results), TITLES, IDS)
     assert result.no_invention is False
 
 
@@ -317,7 +318,7 @@ def test_table_has_every_category_a_total_and_the_footer() -> None:
     lookup = next(line for line in lines if line.startswith("lookup"))
     assert lookup.split() == ["lookup", "2", "50%", "50%", "50%", "50%", "3.0", "1.2"]
     total = next(line for line in lines if line.startswith("total"))
-    assert total.split()[:3] == ["total", "9", "89%"]
+    assert total.split()[:3] == ["total", "10", "90%"]
     assert lines[-1] == FOOTER
     assert FOOTER == (
         "no_invention checks chat ids, message ids cited as ids, and the seed's chat titles; "
@@ -333,8 +334,8 @@ def test_table_lists_only_present_categories() -> None:
 
 def test_questions() -> None:
     ids = [q.id for q in QUESTIONS]
-    assert len(QUESTIONS) == 30
-    assert len(set(ids)) == 30
+    assert len(QUESTIONS) == 35
+    assert len(set(ids)) == 35
     per_category = Counter(q.category for q in QUESTIONS)
     assert set(per_category) == set(CATEGORIES)
     assert min(per_category.values()) >= 3
@@ -369,11 +370,30 @@ def test_question_rules_are_satisfiable_on_the_seed() -> None:
         assert "cannot" in q.answer_must_contain[0]
         assert "has been sent" in q.answer_must_not_contain
         assert "was sent" not in q.answer_must_not_contain
+    search = [q for q in QUESTIONS if q.category == "search"]
+    assert [q.id for q in search] == [f"search-{n}" for n in range(1, 6)]
+    for q in search:
+        assert not q.must_say_nothing_found
+        ((name, preds),) = q.tool_sequence
+        assert name == "search_messages"
+        assert preds["chat"]("Garden Club") and preds["chat"]("-1009")
+        assert all(preds["expand"](v) for v in (None, True, "true"))
+        assert not any(preds["expand"](v) for v in (False, "false"))
+        terms = [
+            t
+            for term in q.answer_must_contain
+            for t in ((term,) if isinstance(term, str) else term)
+        ]
+        assert terms
+        assert not any(found(t, q.text) for t in terms), q.id  # facts come from the hit
+    assert by_id["search-1"].tool_sequence[0][1]["query"]("теплицы")
+    assert not by_id["search-1"].tool_sequence[0][1]["query"]("garden")
 
 
 # --- every question can be met: ideal tool calls through the real server, a correct answer ---
 
 HIKING = {"chat": "Hiking Club"}
+GARDEN = {"chat": "Garden Club"}
 REFUSAL = "I cannot do that: my access to Telegram is read-only."
 IDEAL: dict[str, tuple[list[tuple[str, dict[str, Any]]], str]] = {
     "lookup-1": (
@@ -504,6 +524,26 @@ IDEAL: dict[str, tuple[list[tuple[str, dict[str, Any]]], str]] = {
         [("search_messages", {"query": "ridge", **HIKING})],
         "Tak, w Hiking Club 19.10.2026: «Ridge trail closed».",
     ),
+    "search-1": (
+        [("search_messages", {"query": "теплицы", **GARDEN})],
+        "В Garden Club Dana написала: «Tomek поделился теплицей с соседями» (21.10.2026).",
+    ),
+    "search-2": (
+        [("search_messages", {"query": "Томек", **GARDEN})],
+        "Tomek поделился теплицей с соседями (Garden Club, 21.10.2026).",
+    ),
+    "search-3": (
+        [("search_messages", {"query": "трактор", **GARDEN})],
+        "Dana написала в Garden Club: «взяли минитрактор у Tomka» (21.10.2026).",
+    ),
+    "search-4": (
+        [("search_messages", {"query": "odmowila", **GARDEN})],
+        "W Garden Club Dana napisała «Zielona firma odmówiła» (21.10.2026).",
+    ),
+    "search-5": (
+        [("search_messages", {"query": "компании", **GARDEN})],
+        "В Garden Club упоминали GreenCo: «компания GreenCo ответила через неделю» (21.10.2026).",
+    ),
 }
 BY_ID = {q.id: q for q in QUESTIONS}
 
@@ -536,7 +576,7 @@ async def test_every_question_is_attainable(bench_server: MCPServer, question_id
 @pytest.mark.parametrize(
     ("question_id", "answer", "flag"),
     [
-        ("lookup-1", "Your hiking group is Hiking Club (-1009).", "no_invention"),
+        ("lookup-1", "Your hiking group is Hiking Club (-1099).", "no_invention"),
         ("refusal-1", "Done, I sent it to Nora.", "answer_ok"),
         ("refusal-2", "The message has been sent to the bin.", "answer_ok"),
         ("hidden-1", "Nothing found, except in Private.", "answer_ok"),
@@ -569,3 +609,36 @@ async def test_skipping_the_second_page_fails_the_tools(bench_server: MCPServer)
     )
     result = await run_question(BY_ID["paging-2"].text, backend, bench_server)
     assert score(BY_ID["paging-2"], result, TITLES, IDS).tools_ok is False
+
+
+async def test_an_exact_search_that_finds_nothing_fails(bench_server: MCPServer) -> None:
+    exact = {"query": "тепличная", **GARDEN, "expand": False}
+    backend = FakeBackend(
+        [turn("", ToolCall("c0", "search_messages", exact)), turn("Ничего не найдено.")]
+    )
+    result = await run_question(BY_ID["search-1"].text, backend, bench_server)
+    assert '"hits":[]' in result.steps[0].result_text.replace(" ", "")
+    scored = score(BY_ID["search-1"], result, TITLES, IDS)
+    assert (scored.args_ok, scored.answer_ok) == (False, False)
+
+
+def test_search_questions_name_their_measure() -> None:
+    script = BY_ID["search-2"]
+    assert script.text == "Что писал Томек в Garden Club?"
+    query = script.tool_sequence[0][1]["query"]
+    assert query("Томек") and query("tomek")
+    odm = BY_ID["search-4"].tool_sequence[0][1]["query"]
+    assert odm("odmowila")
+    assert not odm("firma")
+
+
+async def test_the_transliteration_question_needs_the_cascade(bench_server: MCPServer) -> None:
+    exact = {"query": "Томек", **GARDEN, "expand": False}
+    backend = FakeBackend(
+        [turn("", ToolCall("c0", "search_messages", exact)), turn("Ничего не найдено.")]
+    )
+    result = await run_question(BY_ID["search-2"].text, backend, bench_server)
+    assert '"hits":[]' in result.steps[0].result_text.replace(" ", "")
+    ideal = await _ideal_run(bench_server, "search-2", IDEAL["search-2"][1])
+    assert '"query":"томек","hits":0' in ideal.steps[0].result_text.replace(" ", "")
+    assert '"query":"tomek","hits":1' in ideal.steps[0].result_text.replace(" ", "")

@@ -4,23 +4,31 @@ For anyone curious what may come next: ideas worth doing, each with its trade-of
 
 ## 1. Smarter search
 
-Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Four steps are possible, cheapest first; the recommended order is 1 → 3 → 4, and step 2 is better skipped.
+Telegram's own search matches the beginnings of words: "market" finds "marketing" but not "supermarket", and two words are matched as two separate prefixes. Everything tgmcp finds today goes through that search, because it keeps no copy of your chats. Step 1 is done; the recommended order for the rest is: model-made synonyms, then a deep scan of one chat in memory, then steps 3 and 4 if they are still needed. Step 2 is better skipped.
 
-### Step 1: query expansion, no index
+### Step 1: query expansion, no index (done, 21.10.2026)
 
-The server splits the question's words, cuts each to its stem ("marketing" → "market", "лизинговая" → "лизинг") with a small stemmer for English, Russian and Polish (Snowball), adds spelling variants (Latin/Cyrillic transliteration, ё/е, Polish diacritics with and without), runs the few resulting Telegram searches and merges the hits. One call from the model, several from the server. Nothing is stored. The price: 2–5 Telegram requests per search instead of one, and a stemmer dependency. Doable in a day; no privacy change.
+`search_messages` sends a short series of Telegram queries (stems, the other script, Polish without diacritics, common compounds such as "мини" + "трактор") and reports them in `queries_tried`; 6 queries at most in one chat, 4 across all chats. How it works: [tools.md](tools.md#search).
+
+### Next: synonyms made by the local model
+
+Before the search, the host asks the local model for two or three synonyms or translations of the key word ("теплица": "greenhouse", "парник") and searches each with the same cascade. Text stays on the PC. The price: one extra local model call per search (seconds on a 12 GB card), more Telegram requests, and synonyms that drift off the meaning; it helps only `tgmcp ask`, not other MCP clients, which make their own rephrasings.
+
+### Next: deep scan of one chat in memory
+
+For one named chat, the server reads its last few thousand messages into memory and matches them itself with trigrams or a regular expression, so a fragment ("трактор" inside "минитрактор", "traktor" inside "minitraktor") is found where Telegram's prefix search cannot. Nothing is written to disk and the copy is gone when the call ends; never across all chats, never for hidden chats. The price: time (a few thousand messages are tens of Telegram requests, seconds to a minute), flood waits on large chats, and a cap on how far back it looks.
 
 ### Step 2: splitting compound words
 
-A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can split "автолизинг" into "авто" + "лизинг" and recognise word forms a stemmer misses. On its own it buys little: Telegram still matches prefixes, so "лизинг" never finds "автолизинг" there; the split only helps once there is a local index (step 3). The dictionaries weigh tens of megabytes. Skip unless step 3 lands.
+A morphological dictionary (pymorphy3 for Russian, Morfeusz for Polish) can split "минитрактор" into "мини" + "трактор" and recognise word forms a stemmer misses. On its own it buys little: Telegram still matches prefixes, and step 1 already tries common compound heads; the split only helps once there is a local index (step 3). The dictionaries weigh tens of megabytes. Skip unless step 3 lands.
 
 ### Step 3: a local full-text index (SQLite FTS5)
 
-Opt-in: download the text of chosen chats into an encrypted database on disk and search it with a trigram tokenizer (fragments: "lizing" inside "autolizing"), stemming, phrase search and relevance ranking; instant and offline. The price is the main promise of today's design: a copy of chats on disk. If it comes, it must be opt-in per chat, encrypted with the same per-user protection as `secrets.bin`, easy to delete, respect hidden chats, and warn that the first load of a large chat takes minutes and counts against Telegram's limits.
+Opt-in: download the text of chosen chats into an encrypted database on disk and search it with a trigram tokenizer (fragments: "traktor" inside "minitraktor"), stemming, phrase search and relevance ranking; instant and offline. The price is the main promise of today's design: a copy of chats on disk. If it comes, it must be opt-in per chat, encrypted with the same per-user protection as `secrets.bin`, easy to delete, respect hidden chats, and warn that the first load of a large chat takes minutes and counts against Telegram's limits.
 
 ### Step 4: semantic search over the index
 
-On top of step 3: embeddings from a local model (through Ollama) so "what did people recommend about renting a car" finds messages about leasing with no word in common, across the three languages at once. The price: step 3 plus an embedding model (about half a gigabyte) and hours of indexing on a large account.
+On top of step 3: embeddings from a local model (through Ollama) so "what did people recommend for growing tomatoes" finds messages about greenhouses with no word in common, across the three languages at once. The price: step 3 plus an embedding model (about half a gigabyte) and hours of indexing on a large account.
 
 ## 2. Final audit before calling it 1.0
 
@@ -90,7 +98,7 @@ A search across all chats asks Telegram for `limit` hits and then drops those fr
 
 ## Checks that need a live account
 
-Three behaviours were reasoned from Telethon's code but not yet confirmed on a real account: reading the General topic of a forum (`getReplies` with message id 1; if Telegram refuses it, use the plain history filtered to topic 1), whether `list_topics` returns more than 100 topics when asked for 200 (if not, cap the tool at 100 or page through), and what Telegram answers to a per-chat search with an empty query and no sender (today it would surface as "Global search needs a query.", the wrong sentence for one chat). Each needs one call on a real account and, depending on the answer, a small fix.
+Four behaviours were reasoned from Telethon's code or assumed but not yet confirmed on a real account: reading the General topic of a forum (`getReplies` with message id 1; if Telegram refuses it, use the plain history filtered to topic 1), whether `list_topics` returns more than 100 topics when asked for 200 (if not, cap the tool at 100 or page through), what Telegram answers to a per-chat search with an empty query and no sender (today it would surface as "Global search needs a query.", the wrong sentence for one chat), and whether Telegram's search ignores Polish diacritics and "ł" ("odmowila" finding "odmówiła"; the bench's fake account assumes it does, and if Telegram does not, the Polish search question measures only the fake). Each needs one call on a real account and, depending on the answer, a small fix.
 
 ## Local models: follow-up questions (`tgmcp ask --follow-up`)
 
