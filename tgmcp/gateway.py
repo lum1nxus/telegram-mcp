@@ -19,8 +19,9 @@ from telethon.sessions import SQLiteSession, StringSession
 from telethon.tl import types
 
 from tgmcp import models
-from tgmcp.config import Settings
+from tgmcp.config import Settings, legacy_files
 from tgmcp.models import Account, Chat, MediaKind, Message, Topic
+from tgmcp.secrets import NoSecrets, SecretsError, read_secrets, write_secrets
 
 LIBRARY_LOGGER = "telethon"
 IDLE_SECONDS = 600
@@ -34,6 +35,11 @@ class GatewayError(Exception):
 class NotLoggedIn(GatewayError):  # noqa: N818 - name fixed by the interface
     def __init__(self, message: str = "Not logged in: run `tgmcp login` in a terminal.") -> None:
         super().__init__(message)
+
+
+MIGRATE = (
+    "Old clear-text files found: run `tgmcp login` once to move them into the encrypted store."
+)
 
 
 class ApiKeyError(GatewayError):
@@ -266,7 +272,7 @@ _UNREADABLE = "The session file is unreadable: run `tgmcp login` again."
 
 
 def load_session_string(path: Path) -> str:
-    """The saved login as a string, so the client runs on an in-memory session."""
+    """A Telethon SQLite session file as a string (used to move an old clear-text one)."""
     if not path.exists():  # SQLiteSession would create an empty file
         raise NotLoggedIn()
     try:
@@ -351,12 +357,17 @@ def _guard_done(task: asyncio.Task[None]) -> None:
 class TelethonGateway(Gateway):
     """Read-only Telegram access over one lazily connected client."""
 
-    def __init__(self, settings: Settings, session_string: str) -> None:
+    def __init__(
+        self, settings: Settings, session_string: str, *, api_hash: str | None = None
+    ) -> None:
         self._settings = settings
+        key = api_hash or settings.api_hash
+        if not key:
+            raise NotLoggedIn()
         self._tg: Any = TelegramClient(
             StringSession(session_string),
             settings.api_id,
-            settings.api_hash,
+            key,
             flood_sleep_threshold=10,
             receive_updates=False,  # the server only asks; it never listens for updates
         )
@@ -651,21 +662,62 @@ class TelethonGateway(Gateway):
 
 
 def factory(settings: Settings) -> Gateway:
-    """The gateway `serve` hands to the server; a missing session fails before it starts."""
-    return TelethonGateway(settings, load_session_string(settings.session_path))
+    """The gateway `serve` hands to the server; a missing login fails before it starts."""
+    try:
+        stored = read_secrets(settings.secrets_path)
+    except NoSecrets:
+        if legacy_files(settings):
+            raise NotLoggedIn(MIGRATE) from None
+        raise NotLoggedIn() from None
+    except SecretsError as exc:
+        raise NotLoggedIn(str(exc)) from exc
+    return TelethonGateway(settings, stored.session, api_hash=settings.api_hash or stored.api_hash)
 
 
 _DEAD_KEY = (errors.AuthKeyDuplicatedError, errors.AuthKeyUnregisteredError)
 
 
-async def interactive_login(settings: Settings) -> Account:  # noqa: C901 - one except per case
-    """The only place the file session is opened for writing: Telethon asks on the console."""
+def _known_login(settings: Settings) -> str | None:
+    """The login to reuse: the encrypted one, else an old clear-text session file."""
+    try:
+        return read_secrets(settings.secrets_path).session
+    except (NoSecrets, SecretsError):
+        pass
+    try:
+        return load_session_string(settings.legacy_session_path)
+    except NotLoggedIn:
+        return None
+
+
+def _temporary_session(path: Path, seed: str | None) -> SQLiteSession:
+    """A fresh SQLite session for Telethon's console login, holding `seed`'s key if given."""
+    _remove_sqlite(path)  # a file left by a crashed login is never reused
+    session = SQLiteSession(str(path))
+    if seed:
+        known = StringSession(seed)
+        session.set_dc(known.dc_id, known.server_address, known.port)
+        session.auth_key = known.auth_key
+    return session
+
+
+def _remove_sqlite(path: Path) -> None:
+    for name in (path.name, path.name + "-journal"):
+        path.with_name(name).unlink(missing_ok=True)
+
+
+async def _console_login(settings: Settings, api_hash: str) -> tuple[Any, str]:  # noqa: C901
+    """Telethon's console login on a temporary SQLite session; returns the user and the login
+    as a string. The temporary file is removed whatever happens."""
+    temp = settings.home / "login.session"
+    session: SQLiteSession | None = None
     client: Any = None
     dead = False
     try:
-        client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
+        session = _temporary_session(temp, _known_login(settings))
+        client = TelegramClient(session, settings.api_id, api_hash)
         await client.start()
         me = await client.get_me()
+        login: str = StringSession.save(client.session)
     except errors.ApiIdInvalidError as e:
         raise ApiKeyError(
             "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
@@ -690,14 +742,35 @@ async def interactive_login(settings: Settings) -> Account:  # noqa: C901 - one 
     finally:
         if client is not None:
             await client.disconnect()  # also closes the session file
+        if session is not None:
+            session.close()
+        _remove_sqlite(temp)
         if dead:
-            settings.session_path.unlink(missing_ok=True)
+            settings.secrets_path.unlink(missing_ok=True)
+            _remove_sqlite(settings.legacy_session_path)
+    return me, login
+
+
+async def interactive_login(settings: Settings, api_hash: str) -> Account:
+    """Log in (Telethon asks on the console) and keep the login only in the encrypted secrets
+    file. An existing login (the secrets file, or an old clear-text session file) is reused,
+    so Telegram does not ask for a code again."""
+    me, login = await _console_login(settings, api_hash)
+    if not login:
+        raise GatewayError("Telegram did not finish the login: run `tgmcp login` again.")
+    try:
+        write_secrets(settings.secrets_path, api_hash, login)
+    except OSError as e:
+        raise GatewayError(f"Could not save the login in {settings.secrets_path}.") from e
     return Account(id=me.id, name=utils.get_display_name(me), username=me.username)
 
 
 async def end_session(settings: Settings) -> None:
-    """The only place the file session is opened for writing: ends the login on Telegram."""
-    client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
+    """Ends the stored login on Telegram; the caller then removes the secrets file."""
+    stored = read_secrets(settings.secrets_path)
+    client = TelegramClient(
+        StringSession(stored.session), settings.api_id, settings.api_hash or stored.api_hash
+    )
     try:
         await client.connect()
         await client.log_out()

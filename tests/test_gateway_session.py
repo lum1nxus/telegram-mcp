@@ -1,12 +1,16 @@
+import dataclasses
 import logging
 import os
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
-from telethon.sessions import SQLiteSession
+from telethon.sessions import SQLiteSession, StringSession
 
-from tgmcp import logging_setup
+from tests.factories import make_session_string
+from tgmcp import config, gateway, logging_setup, secrets
+from tgmcp.config import Settings
 from tgmcp.gateway import NotLoggedIn, load_session_string
 
 
@@ -94,3 +98,71 @@ def test_configure_removes_week_old_logs_of_other_processes(tmp_path: Path):
     assert not old.exists()
     assert recent.exists() and other.exists()
     assert written.exists()
+
+
+class Recorder:
+    """Stands in for TelegramClient: records what the gateway built it from."""
+
+    built: ClassVar[list[tuple[str, int, str]]] = []
+    log_outs = 0
+
+    def __init__(self, session: StringSession, api_id: int, api_hash: str, **_: object) -> None:
+        Recorder.built.append((session.save(), api_id, api_hash))
+
+    async def connect(self) -> None:
+        return None
+
+    async def log_out(self) -> None:
+        Recorder.log_outs += 1
+
+    async def disconnect(self) -> None:
+        return None
+
+
+@pytest.fixture
+def stored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setattr(config, "restrict_to_owner", lambda path: None)
+    monkeypatch.setattr(gateway, "TelegramClient", Recorder)
+    Recorder.built = []
+    Recorder.log_outs = 0
+    return Settings(api_id=7, api_hash=None, hidden_chats=(), expected_user=None, home=tmp_path)
+
+
+def test_factory_without_secrets_is_not_logged_in(stored: Settings):
+    with pytest.raises(NotLoggedIn) as caught:
+        gateway.factory(stored)
+    assert str(caught.value) == "Not logged in: run `tgmcp login` in a terminal."
+
+
+def test_factory_with_only_old_files_asks_to_move_them(stored: Settings):
+    stored.legacy_session_path.write_bytes(b"old")
+    with pytest.raises(NotLoggedIn) as caught:
+        gateway.factory(stored)
+    assert str(caught.value) == gateway.MIGRATE
+
+
+def test_factory_with_undecryptable_secrets(stored: Settings, monkeypatch):
+    stored.secrets_path.write_bytes(b"blob")
+
+    def refuse(blob: bytes) -> bytes:
+        raise secrets.SecretsError(secrets.FOREIGN)
+
+    monkeypatch.setattr(secrets, "unprotect", refuse)
+    with pytest.raises(NotLoggedIn, match="cannot be decrypted"):
+        gateway.factory(stored)
+
+
+def test_factory_takes_the_hash_from_the_secrets_unless_overridden(stored: Settings):
+    text = make_session_string()
+    secrets.write_secrets(stored.secrets_path, "stored-hash", text)
+    gateway.factory(stored)
+    gateway.factory(dataclasses.replace(stored, api_hash="env-hash"))
+    assert Recorder.built == [(text, 7, "stored-hash"), (text, 7, "env-hash")]
+
+
+async def test_end_session_uses_the_stored_login(stored: Settings):
+    text = make_session_string()
+    secrets.write_secrets(stored.secrets_path, "stored-hash", text)
+    await gateway.end_session(stored)
+    assert Recorder.built == [(text, 7, "stored-hash")]
+    assert Recorder.log_outs == 1

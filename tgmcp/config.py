@@ -31,17 +31,27 @@ def home(env: Mapping[str, str] | None = None) -> Path:
     return Path(override) if override else _default_home()
 
 
+SECRETS_FILE = "secrets.bin"
+LEGACY_SESSION_FILE = "telegram.session"
+
+
 @dataclass(frozen=True)
 class Settings:
     api_id: int
-    api_hash: str
+    api_hash: str | None  # only TGMCP_API_HASH (development); normally inside secrets.bin
     hidden_chats: tuple[str, ...]
     expected_user: str | None
     home: Path
 
     @property
-    def session_path(self) -> Path:
-        return self.home / "telegram.session"
+    def secrets_path(self) -> Path:
+        """The API hash and the login key, encrypted (see `tgmcp.secrets`)."""
+        return self.home / SECRETS_FILE
+
+    @property
+    def legacy_session_path(self) -> Path:
+        """Where versions before the encrypted store kept the login key in clear text."""
+        return self.home / LEGACY_SESSION_FILE
 
     @property
     def log_path(self) -> Path:
@@ -70,9 +80,8 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     root = home(env)
     data = _read_file(root / "config.json")
     api_id = env.get("TGMCP_API_ID") or data.get("api_id")
-    api_hash = env.get("TGMCP_API_HASH") or data.get("api_hash")
-    if not api_id or not api_hash:
-        raise ConfigError("api_id and api_hash are missing; run 'tgmcp login' or set TGMCP_API_ID.")
+    if not api_id:
+        raise ConfigError("api_id is missing; run 'tgmcp login' or set TGMCP_API_ID.")
     try:
         api_id_int = int(api_id)
     except ValueError as exc:
@@ -83,7 +92,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     expected = env.get("TGMCP_EXPECTED_USER") or data.get("expected_user")
     return Settings(
         api_id=api_id_int,
-        api_hash=str(api_hash),
+        api_hash=env.get("TGMCP_API_HASH") or None,
         hidden_chats=_split_chats(hidden if hidden is not None else data.get("hidden_chats")),
         expected_user=str(expected) if expected else None,
         home=root,
@@ -122,25 +131,57 @@ def ensure_home(home: Path) -> Path:
     return home
 
 
-def save_credentials(api_id: int, api_hash: str, home: Path) -> None:
+def _write_file(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def save_credentials(api_id: int, home: Path) -> None:
+    """Save the API id; the API hash goes only into the encrypted secrets file."""
     ensure_home(home)
     path = home / "config.json"
     old = _read_file(path)
     data = {
         "api_id": api_id,
-        "api_hash": api_hash,
         "hidden_chats": old.get("hidden_chats", []),
         "expected_user": old.get("expected_user"),
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_file(path, data)
 
 
 def forget_credentials(home: Path) -> None:
-    """Drop the API id and hash from config.json, keeping the other settings."""
+    """Drop the API id (and an old clear-text hash) from config.json, keeping the other
+    settings, and remove the secrets file, which holds the API hash."""
+    (home / SECRETS_FILE).unlink(missing_ok=True)
     path = home / "config.json"
     if not path.exists():
         return
     data = _read_file(path)
     data.pop("api_id", None)
     data.pop("api_hash", None)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_file(path, data)
+
+
+def legacy_api_hash(home: Path) -> str | None:
+    """The API hash an older version kept in clear text in config.json, if it is still there."""
+    found = _read_file(home / "config.json").get("api_hash")
+    return str(found) if found else None
+
+
+def legacy_files(settings: Settings) -> list[Path]:
+    """Clear-text secrets left by an older version: its session file and a config.json that
+    still holds the API hash. `tgmcp login` moves them into the encrypted store."""
+    found = [settings.legacy_session_path] if settings.legacy_session_path.exists() else []
+    if legacy_api_hash(settings.home) is not None:
+        found.append(settings.home / "config.json")
+    return found
+
+
+def remove_legacy_files(settings: Settings) -> None:
+    """After a successful login: drop the old session file and the clear-text API hash."""
+    for name in (LEGACY_SESSION_FILE, LEGACY_SESSION_FILE + "-journal"):
+        (settings.home / name).unlink(missing_ok=True)
+    path = settings.home / "config.json"
+    data = _read_file(path)
+    if "api_hash" in data:
+        del data["api_hash"]
+        _write_file(path, data)

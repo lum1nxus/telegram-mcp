@@ -4,15 +4,19 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from telethon import errors
+from telethon.crypto import AuthKey
+from telethon.sessions import SQLiteSession, StringSession
 from telethon.tl import functions, types
 
+from tests.factories import make_session_string
 from tests.test_gateway_mappers import WHEN, _channel, _dialog
-from tgmcp import gateway
+from tgmcp import config, gateway, secrets
 from tgmcp.config import Settings
 from tgmcp.gateway import ApiKeyError, Busy, GatewayError, TelethonGateway
 
@@ -364,59 +368,139 @@ async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway)
 
 
 class LoginClient:
-    """Stands in for TelegramClient in interactive_login."""
+    """Stands in for TelegramClient in interactive_login; a successful start stores a key."""
 
     error: Exception | None = None
     disconnects = 0
+    had_key: bool | None = None
 
-    def __init__(self, session: str, api_id: int, api_hash: str) -> None:
+    def __init__(self, session: SQLiteSession, api_id: int, api_hash: str) -> None:
         self.session = session
 
     async def start(self) -> None:
+        LoginClient.had_key = self.session.auth_key is not None
         if LoginClient.error is not None:
             raise LoginClient.error
+        if self.session.auth_key is None:
+            self.session.set_dc(2, "149.154.167.51", 443)
+            self.session.auth_key = AuthKey(b"" * 256)
 
     async def get_me(self) -> Any:
         return types.User(id=100, first_name="Alex", username="alex", access_hash=1)
 
     async def disconnect(self) -> None:
         LoginClient.disconnects += 1
+        self.session.close()
 
 
 @pytest.fixture
 def login_settings(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setattr(gateway, "TelegramClient", LoginClient)
+    monkeypatch.setattr(config, "restrict_to_owner", lambda path: None)
     LoginClient.error = None
     LoginClient.disconnects = 0
-    return Settings(api_id=1, api_hash="a", hidden_chats=(), expected_user=None, home=tmp_path)
+    LoginClient.had_key = None
+    return Settings(api_id=1, api_hash=None, hidden_chats=(), expected_user=None, home=tmp_path)
+
+
+def _files(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.iterdir())
+
+
+def _legacy_session(path: Path) -> None:
+    """What the old version left: Telethon's SQLite file with a login key."""
+    session = SQLiteSession(str(path))
+    session.set_dc(2, "149.154.167.51", 443)
+    session.auth_key = AuthKey(b"" * 256)
+    session.save()
+    session.close()
 
 
 async def test_login_maps_wrong_api_key(login_settings: Settings):
     LoginClient.error = errors.ApiIdInvalidError(request=None)
     with pytest.raises(ApiKeyError, match=r"tgmcp login --reset"):
-        await gateway.interactive_login(login_settings)
+        await gateway.interactive_login(login_settings, "h")
     assert LoginClient.disconnects == 1
+    assert _files(login_settings.home) == []
 
 
 async def test_login_maps_three_wrong_codes(login_settings: Settings):
     LoginClient.error = RuntimeError("3 consecutive sign-in attempts failed. Aborting")
     with pytest.raises(GatewayError) as caught:
-        await gateway.interactive_login(login_settings)
+        await gateway.interactive_login(login_settings, "h")
     assert str(caught.value) == "The code was wrong three times: run `tgmcp login` again."
+    assert _files(login_settings.home) == []
 
 
 @pytest.mark.parametrize(
     "error", [errors.AuthKeyDuplicatedError(request=None), errors.AuthKeyUnregisteredError(None)]
 )
 async def test_login_removes_a_dead_session(login_settings: Settings, error: Exception):
-    login_settings.session_path.write_text("old", encoding="utf-8")
+    _legacy_session(login_settings.legacy_session_path)
+    secrets.write_secrets(login_settings.secrets_path, "h", make_session_string())
     LoginClient.error = error
     with pytest.raises(GatewayError, match="it was removed"):
-        await gateway.interactive_login(login_settings)
-    assert not login_settings.session_path.exists()
+        await gateway.interactive_login(login_settings, "h")
+    assert _files(login_settings.home) == []
     assert LoginClient.disconnects == 1
 
 
-async def test_login_returns_the_account(login_settings: Settings):
-    account = await gateway.interactive_login(login_settings)
+async def test_login_writes_encrypted_secrets_and_no_session_file(login_settings: Settings):
+    account = await gateway.interactive_login(login_settings, "the-hash")
     assert (account.name, account.username) == ("Alex", "alex")
+    assert LoginClient.had_key is False
+    assert _files(login_settings.home) == ["secrets.bin"]
+    saved = secrets.read_secrets(login_settings.secrets_path)
+    assert saved.api_hash == "the-hash"
+    assert StringSession(saved.session).auth_key.key == b"" * 256
+
+
+async def test_login_reuses_the_saved_login(login_settings: Settings):
+    old = make_session_string()
+    secrets.write_secrets(login_settings.secrets_path, "h", old)
+    await gateway.interactive_login(login_settings, "h")
+    assert LoginClient.had_key is True
+    assert secrets.read_secrets(login_settings.secrets_path).session == old
+
+
+async def test_login_moves_the_old_session_file(login_settings: Settings):
+    _legacy_session(login_settings.legacy_session_path)
+    await gateway.interactive_login(login_settings, "h")
+    assert LoginClient.had_key is True
+    saved = secrets.read_secrets(login_settings.secrets_path)
+    assert StringSession(saved.session).auth_key.key == b"" * 256
+    assert "login.session" not in _files(login_settings.home)
+
+
+async def test_login_discards_a_leftover_temporary_file(login_settings: Settings):
+    (login_settings.home / "login.session").write_bytes(b"junk from a crashed login")
+    await gateway.interactive_login(login_settings, "h")
+    assert LoginClient.had_key is False
+    assert _files(login_settings.home) == ["secrets.bin"]
+
+
+async def test_interrupted_login_leaves_no_temporary_file(login_settings: Settings):
+    LoginClient.error = KeyboardInterrupt()  # Ctrl-C at the code prompt
+    with pytest.raises(KeyboardInterrupt):
+        await gateway.interactive_login(login_settings, "h")
+    assert _files(login_settings.home) == []
+
+
+async def test_login_that_cannot_save_says_so(login_settings: Settings, monkeypatch):
+    def full_disk(path: Path, api_hash: str, session: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(gateway, "write_secrets", full_disk)
+    with pytest.raises(GatewayError, match="Could not save the login"):
+        await gateway.interactive_login(login_settings, "h")
+    assert _files(login_settings.home) == []
+
+
+async def test_login_without_a_key_is_not_saved(login_settings: Settings, monkeypatch):
+    async def no_key(self: LoginClient) -> None:
+        return None
+
+    monkeypatch.setattr(LoginClient, "start", no_key)
+    with pytest.raises(GatewayError, match="did not finish"):
+        await gateway.interactive_login(login_settings, "h")
+    assert _files(login_settings.home) == []

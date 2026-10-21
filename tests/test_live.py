@@ -9,8 +9,8 @@ pytestmark = pytest.mark.live
 
 
 def _settings() -> config.Settings:
-    if not (config.home() / "telegram.session").exists():
-        pytest.skip("no session file: run `tgmcp login` first")
+    if not (config.home() / config.SECRETS_FILE).exists():
+        pytest.skip("no secrets file: run `tgmcp login` first")
     try:
         return config.load_settings()
     except config.ConfigError as exc:
