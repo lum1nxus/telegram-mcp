@@ -413,3 +413,22 @@ async def test_date_range_search(client):                             # since/un
 - [ ] Reviewer subagent (most capable model) reads the spec, the plan and the full diff: read-only contract, stdout discipline, secrets, hidden chats, size caps, error texts.
 - [ ] Fix findings; `check.py` exit 0.
 - [ ] Create the GitHub repository `lum1nxus/telegram-mcp` (private) and push `main` — only when the owner says so.
+
+### Task 12: Secrets encrypted at rest with Windows DPAPI (added 21.10.2026 after the CodeQL finding)
+
+**Why:** `config.json` held the API hash and `telegram.session` held the account key in clear text; the owner chose option B (spec section 5.4 amended): both secrets are kept in one DPAPI-protected file, so a copied file is useless on another PC or under another Windows user. Researched and rejected: Credential Manager (DPAPI underneath, 2 560-byte cap), TPM / Windows Hello keys (a consent prompt, no protection against code running as the same user, and `serve` runs unattended), passphrase encryption (`serve` cannot prompt). Not claimed: protection against malware running as the owner — no OS store gives that.
+
+**Files:**
+- Create: `tgmcp/secrets.py` (the only module calling DPAPI; `ctypes` + `crypt32`, no new dependency)
+- Modify: `tgmcp/config.py`, `tgmcp/gateway.py` (`load_session_string`, `interactive_login`, `end_session`, `factory`), `tgmcp/cli.py`, `README.md`, spec section 5.4
+- Test: `tests/test_secrets.py`, `tests/test_config.py`, `tests/test_gateway_session.py`, `tests/test_cli.py`
+
+**Interfaces:**
+- `secrets.protect(data: bytes) -> bytes` / `secrets.unprotect(blob: bytes) -> bytes`: on Windows `CryptProtectData` / `CryptUnprotectData`, user scope, `CRYPTPROTECT_UI_FORBIDDEN` (0x1), description `"tgmcp"`, no optional entropy (a constant in a public repository protects nothing); a failed unprotect raises `SecretsError("The secrets file cannot be decrypted on this computer or user account: run `tgmcp login` again.")`. On other platforms both are identity functions and `secrets.PLAIN = True` (the file then relies on the `0o600` mode; `whoami` prints a warning line).
+- `secrets.write_secrets(path: Path, api_hash: str, session: str) -> None` writes `protect(json.dumps({"v": 1, "api_hash": ..., "session": ...}).encode())` to `path` (atomic: temp file + `os.replace`), then `restrict_to_owner(path)`.
+- `secrets.read_secrets(path: Path) -> Secrets` (`@dataclass(frozen=True) Secrets(api_hash: str, session: str)`); a missing file raises `NoSecrets`; a corrupt or foreign blob raises `SecretsError`.
+- `config.json` keeps `api_id`, `hidden_chats`, `expected_user` only; `Settings` gains `secrets_path` (`home / "secrets.bin"`) and loses `api_hash` from the file (env `TGMCP_API_HASH` still overrides for development; `load_settings` returns `api_hash=None` when neither is set and the CLI asks `login`).
+- `gateway.interactive_login(settings)`: logs in on a temporary SQLite session in the data folder, converts it with `StringSession.save`, calls `write_secrets(settings.secrets_path, api_hash, string)`, deletes the SQLite file (and its `-journal`), returns `Account`. `load_session_string` is replaced by `read_secrets(...).session`. `end_session` builds the client from the string, `log_out`, then the CLI deletes `secrets.bin`. `factory` reads `api_hash` from the secrets file when `settings.api_hash` is `None`.
+- Migration: when `secrets.bin` is missing but the old `telegram.session` or an `api_hash` in `config.json` exists, `login`/`serve`/`whoami` print one sentence ("Old clear-text files found: run `tgmcp login` once to move them into the encrypted store.") and, after a successful `login`, delete them.
+
+- [ ] Steps as in every task: failing tests first (`protect`/`unprotect` round-trip on Windows; a tampered blob fails; `write_secrets` output contains neither the hash nor the session string as bytes; `read_secrets` on a missing file; `login` leaves no `.session` file; `logout` removes `secrets.bin`; `serve` exits 2 with the migration sentence when only old files exist; `whoami` warning line on non-Windows via monkeypatched `secrets.PLAIN`), implementation, gate, commit `feat: secrets encrypted at rest with DPAPI`, README section "Where things are stored" rewritten, spec 5.4 amended.
