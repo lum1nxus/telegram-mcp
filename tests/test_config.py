@@ -106,11 +106,16 @@ def test_legacy_files_lists_clear_text_leftovers(tmp_path):
     assert config.legacy_files(settings) == [tmp_path / "telegram.session", cfg]
 
 
+def test_legacy_files_lists_a_stray_login_session(tmp_path):
+    (tmp_path / "login.session").write_bytes(b"x")
+    assert config.legacy_files(_settings(tmp_path)) == [tmp_path / "login.session"]
+
+
 def test_remove_legacy_files_keeps_other_settings(tmp_path):
     settings = _settings(tmp_path)
     cfg = tmp_path / "config.json"
     cfg.write_text('{"api_id": 1, "api_hash": "a", "hidden_chats": ["@x"]}', encoding="utf-8")
-    for name in ("telegram.session", "telegram.session-journal"):
+    for name in config.LEGACY_SQLITE_FILES:
         (tmp_path / name).write_bytes(b"x")
     config.remove_legacy_files(settings)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["config.json"]

@@ -26,7 +26,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-async def _logged_in(settings: Settings, api_hash: str) -> Account:
+async def _logged_in(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
     """What a successful interactive_login leaves behind: the encrypted secrets file only."""
     secrets.write_secrets(settings.secrets_path, api_hash, make_session_string())
     return Account(id=9, name="Slava", username=None)
@@ -126,7 +126,7 @@ def test_login_prompts_for_missing_credentials(env, capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt="": "42")
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "hash")
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         assert (settings.api_id, api_hash) == (42, "hash")
         return await _logged_in(settings, api_hash)
 
@@ -147,7 +147,7 @@ def test_login_takes_the_hash_from_the_secrets_file(env, monkeypatch):
     monkeypatch.setattr(cli.getpass, "getpass", no_prompt)
     seen: list[str] = []
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         seen.append(api_hash)
         return await _logged_in(settings, api_hash)
 
@@ -163,9 +163,10 @@ def test_login_moves_old_clear_text_files(env, capsys, monkeypatch):
         '{"api_id": 1, "api_hash": "old", "hidden_chats": ["@x"]}', encoding="utf-8"
     )
     (env / "telegram.session").write_bytes(b"old login")
+    (env / "login.session").write_bytes(b"left by an early build")
     seen: list[str] = []
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         seen.append(api_hash)
         return await _logged_in(settings, api_hash)
 
@@ -181,7 +182,7 @@ def test_login_moves_old_clear_text_files(env, capsys, monkeypatch):
 def test_failed_login_keeps_old_files(env, monkeypatch):
     (env / "telegram.session").write_bytes(b"old login")
 
-    async def failing(settings: Settings, api_hash: str) -> Account:
+    async def failing(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         raise GatewayError("Could not reach Telegram: check the network and try again.")
 
     monkeypatch.setattr(cli, "interactive_login", failing)
@@ -256,7 +257,7 @@ def test_logout_removes_secrets_even_when_telegram_fails(env, capsys, monkeypatc
 
 
 def test_login_failure_prints_sentence_and_exits_1(env, capsys, monkeypatch):
-    async def failing(settings: Settings, api_hash: str) -> Account:
+    async def failing(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         raise GatewayError("The code was wrong or expired: run `tgmcp login` again.")
 
     monkeypatch.setattr(cli, "interactive_login", failing)
@@ -326,7 +327,7 @@ def test_login_reset_asks_again_and_saves_new_credentials(env, monkeypatch):
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "new")
     seen: list[tuple[int, str]] = []
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         seen.append((settings.api_id, api_hash))
         return await _logged_in(settings, api_hash)
 
@@ -352,15 +353,15 @@ def test_login_reset_asks_for_the_hash_kept_in_the_secrets_file(env, monkeypatch
         return "fresh"
 
     monkeypatch.setattr(cli.getpass, "getpass", ask)
-    seen: list[str] = []
+    seen: list[tuple[str, bool]] = []
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
-        seen.append(api_hash)
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
+        seen.append((api_hash, reuse))
         return await _logged_in(settings, api_hash)
 
     monkeypatch.setattr(cli, "interactive_login", fake_login)
     assert cli.main(["login", "--reset"]) == 0
-    assert (hashes, seen) == (["API hash: "], ["fresh"])
+    assert (hashes, seen) == (["API hash: "], [("fresh", False)])
 
 
 def test_login_forgets_rejected_credentials(env, capsys, monkeypatch):
@@ -370,7 +371,7 @@ def test_login_forgets_rejected_credentials(env, capsys, monkeypatch):
         '{"api_id": 1, "api_hash": "bad", "hidden_chats": ["@x"]}', encoding="utf-8"
     )
 
-    async def rejected(settings: Settings, api_hash: str) -> Account:
+    async def rejected(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         raise ApiKeyError(
             "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
         )
@@ -388,7 +389,7 @@ def test_login_and_serve_restrict_a_new_home(tmp_path, monkeypatch):
     monkeypatch.setenv("TGMCP_API_ID", "1")
     monkeypatch.setenv("TGMCP_API_HASH", "a")
 
-    async def fake_login(settings: Settings, api_hash: str) -> Account:
+    async def fake_login(settings: Settings, api_hash: str, *, reuse: bool = True) -> Account:
         return Account(id=9, name="Slava", username=None)
 
     monkeypatch.setattr(cli, "interactive_login", fake_login)

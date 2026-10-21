@@ -33,6 +33,14 @@ def home(env: Mapping[str, str] | None = None) -> Path:
 
 SECRETS_FILE = "secrets.bin"
 LEGACY_SESSION_FILE = "telegram.session"
+# Clear-text SQLite files older versions may have left: the session, the temporary login
+# session of an early build of the encrypted store, and their journals.
+LEGACY_SQLITE_FILES = (
+    LEGACY_SESSION_FILE,
+    LEGACY_SESSION_FILE + "-journal",
+    "login.session",
+    "login.session-journal",
+)
 
 
 @dataclass(frozen=True)
@@ -170,7 +178,7 @@ def legacy_api_hash(home: Path) -> str | None:
 def legacy_files(settings: Settings) -> list[Path]:
     """Clear-text secrets left by an older version: its session file and a config.json that
     still holds the API hash. `tgmcp login` moves them into the encrypted store."""
-    found = [settings.legacy_session_path] if settings.legacy_session_path.exists() else []
+    found = [settings.home / n for n in LEGACY_SQLITE_FILES if (settings.home / n).exists()]
     if legacy_api_hash(settings.home) is not None:
         found.append(settings.home / "config.json")
     return found
@@ -178,7 +186,7 @@ def legacy_files(settings: Settings) -> list[Path]:
 
 def remove_legacy_files(settings: Settings) -> None:
     """After a successful login: drop the old session file and the clear-text API hash."""
-    for name in (LEGACY_SESSION_FILE, LEGACY_SESSION_FILE + "-journal"):
+    for name in LEGACY_SQLITE_FILES:
         (settings.home / name).unlink(missing_ok=True)
     path = settings.home / "config.json"
     data = _read_file(path)

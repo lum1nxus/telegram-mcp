@@ -226,19 +226,24 @@ it is. The secrets file is restricted too (`USER:F`; `0600`).
 
 Secrets at rest (amended 21.10.2026, owner's option B). DPAPI ties `secrets.bin`
 to this Windows user on this computer: a copied file is useless on another PC or
-under another user. It does not protect against a program running as the owner;
+under another user, unless the attacker also has the profile's DPAPI master keys
+and the user's password (a full profile backup). It does not protect against a program running as the owner;
 no OS store does, and this is not claimed. An administrator's reset of the
 Windows password can make the file undecryptable; tgmcp then says so and
 `tgmcp login` writes a new one. `tgmcp/secrets.py` is the only module that calls
 DPAPI (`ctypes`, no new dependency); on other platforms the payload is stored as
 it is, the `0600` mode is the only protection, and `whoami` prints a warning.
-`login` runs Telethon's console login on a temporary SQLite session
-(`login.session`, removed in every case), reusing an existing login if there is
-one, then writes `secrets.bin`. Migration: when `secrets.bin` is missing but the
+`login` runs Telethon's console login on an in-memory `StringSession`, so the
+key never reaches the disk in clear text; it reuses an existing login if there
+is one (not with `--reset`), then writes `secrets.bin`. `--reset` does not log
+out: the old login stays in Telegram's Devices list until `logout` or until the
+owner ends it there. Migration: when `secrets.bin` is missing but the
 old clear-text `telegram.session` or an `api_hash` in `config.json` exists,
 `serve`, `whoami` and `logout` say "Old clear-text files found: run `tgmcp login`
 once to move them into the encrypted store."; `login` moves the old login and
-hash into `secrets.bin` and then removes the old files.
+hash into `secrets.bin` and then removes the old files (also a `login.session`
+left by an early build). Removing is not shredding: copies in backups, cloud
+sync or shadow copies stay valid until `tgmcp logout`.
 
 Rejected alternatives:
 - Windows Credential Manager: DPAPI underneath, and a 2 560-byte cap per entry.
