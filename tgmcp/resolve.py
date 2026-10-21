@@ -35,11 +35,16 @@ class Directory:
         self._cache: list[Chat] | None = None
         self._loaded_at = 0.0
 
-    def is_hidden(self, chat: Chat) -> bool:
+    @staticmethod
+    def hidden_keys(chat: Chat) -> set[str]:
+        """The spellings a hidden-chat entry may use for this chat (lower case)."""
         keys = {str(chat.id), chat.title.lower()}
         if chat.username:
             keys |= {chat.username.lower(), f"@{chat.username.lower()}"}
-        return not keys.isdisjoint(self._hidden)
+        return keys
+
+    def is_hidden(self, chat: Chat) -> bool:
+        return not self.hidden_keys(chat).isdisjoint(self._hidden)
 
     async def _load(self) -> list[Chat]:
         dialogs = await self._gateway.dialogs()

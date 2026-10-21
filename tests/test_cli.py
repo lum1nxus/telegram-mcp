@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -5,9 +6,9 @@ from telethon.sessions import SQLiteSession
 
 from tests.factories import make_chat
 from tests.fake_gateway import FakeGateway
-from tgmcp import cli
+from tgmcp import cli, config
 from tgmcp.config import Settings
-from tgmcp.gateway import GatewayError
+from tgmcp.gateway import ApiKeyError, GatewayError
 from tgmcp.models import Account
 
 
@@ -199,3 +200,76 @@ def test_login_without_terminal_input_exits_1(env, capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", eof)
     assert cli.main(["login"]) == 1
     assert "interactive terminal" in capsys.readouterr().err
+
+
+def _no_terminal_input(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> list[str]:
+    prompts: list[str] = []
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return answers.pop(0)
+
+    monkeypatch.setattr("builtins.input", answer)
+    return prompts
+
+
+def test_login_reset_asks_again_and_saves_new_credentials(env, monkeypatch):
+    monkeypatch.delenv("TGMCP_API_ID")
+    monkeypatch.delenv("TGMCP_API_HASH")
+    (env / "config.json").write_text(
+        '{"api_id": 1, "api_hash": "old", "hidden_chats": ["@x"]}', encoding="utf-8"
+    )
+    prompts = _no_terminal_input(monkeypatch, ["77"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "new")
+    seen: list[tuple[int, str]] = []
+
+    async def fake_login(settings: Settings) -> Account:
+        seen.append((settings.api_id, settings.api_hash))
+        return Account(id=9, name="Slava", username=None)
+
+    monkeypatch.setattr(cli, "interactive_login", fake_login)
+    assert cli.main(["login", "--reset"]) == 0
+    assert prompts == ["API id: "]
+    assert seen == [(77, "new")]
+    saved = json.loads((env / "config.json").read_text(encoding="utf-8"))
+    assert (saved["api_id"], saved["api_hash"], saved["hidden_chats"]) == (77, "new", ["@x"])
+
+
+def test_login_forgets_rejected_credentials(env, capsys, monkeypatch):
+    monkeypatch.delenv("TGMCP_API_ID")
+    monkeypatch.delenv("TGMCP_API_HASH")
+    (env / "config.json").write_text(
+        '{"api_id": 1, "api_hash": "bad", "hidden_chats": ["@x"]}', encoding="utf-8"
+    )
+
+    async def rejected(settings: Settings) -> Account:
+        raise ApiKeyError(
+            "The API id or hash is wrong: run `tgmcp login --reset` to enter them again."
+        )
+
+    monkeypatch.setattr(cli, "interactive_login", rejected)
+    assert cli.main(["login"]) == 1
+    assert "tgmcp login --reset" in capsys.readouterr().err
+    saved = json.loads((env / "config.json").read_text(encoding="utf-8"))
+    assert saved == {"hidden_chats": ["@x"]}
+
+
+def test_login_and_serve_restrict_a_new_home(tmp_path, monkeypatch):
+    restricted: list[Path] = []
+    monkeypatch.setattr(config, "restrict_to_owner", restricted.append)
+    monkeypatch.setattr(cli, "restrict_to_owner", lambda path: None)
+    monkeypatch.setenv("TGMCP_API_ID", "1")
+    monkeypatch.setenv("TGMCP_API_HASH", "a")
+
+    async def fake_login(settings: Settings) -> Account:
+        return Account(id=9, name="Slava", username=None)
+
+    monkeypatch.setattr(cli, "interactive_login", fake_login)
+    login_home = tmp_path / "login"
+    monkeypatch.setenv("TGMCP_HOME", str(login_home))
+    assert cli.main(["login"]) == 0
+    serve_home = tmp_path / "serve"
+    monkeypatch.setenv("TGMCP_HOME", str(serve_home))
+    monkeypatch.setattr(cli.logging_setup, "configure", lambda path: path)
+    assert cli.main(["serve"]) == 2  # no session file
+    assert restricted == [login_home, serve_home]

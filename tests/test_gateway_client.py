@@ -12,8 +12,9 @@ from telethon import errors
 from telethon.tl import functions, types
 
 from tests.test_gateway_mappers import WHEN, _channel, _dialog
+from tgmcp import gateway
 from tgmcp.config import Settings
-from tgmcp.gateway import Busy, GatewayError, TelethonGateway
+from tgmcp.gateway import ApiKeyError, Busy, GatewayError, TelethonGateway
 
 FORUM_ID = -1000000001005
 
@@ -45,7 +46,7 @@ class StubClient:
         self.results: list[Any] = []
         self.messages: dict[str, list[Any]] = {"ids": [], "before": [], "after": [], "plain": []}
         self.me_error: Exception | None = None
-        self.entity_lookups: list[str] = []
+        self.entity_lookups: list[Any] = []
         self._self_id = 1
         self._mb_entity_cache = SimpleNamespace(get=lambda _id: None)
         entity = _channel(megagroup=True, forum=True, username="expats")
@@ -70,7 +71,7 @@ class StubClient:
             raise self.me_error
         return types.User(id=100, first_name="Slava", username="slava", access_hash=1)
 
-    async def get_input_entity(self, value: str) -> Any:
+    async def get_input_entity(self, value: Any) -> Any:
         self.entity_lookups.append(value)
         return types.InputPeerUser(user_id=333, access_hash=1)
 
@@ -155,10 +156,11 @@ async def test_around_missing_target(gw: TelethonGateway):
 async def test_input_user_parsing(gw: TelethonGateway):
     stub = _stub(gw)
     assert await gw._input_user(stub, None) is None
-    assert await gw._input_user(stub, "333") == 333
+    by_id = await gw._input_user(stub, "333")
     peer = await gw._input_user(stub, "@anna")
+    assert isinstance(by_id, types.InputPeerUser)
     assert isinstance(peer, types.InputPeerUser)
-    assert stub.entity_lookups == ["@anna"]
+    assert stub.entity_lookups == [333, "@anna"]  # a numeric id is resolved now, as an int
     with pytest.raises(GatewayError, match="sender must be a user id or @username"):
         await gw._input_user(stub, "Anna K")
 
@@ -177,7 +179,8 @@ async def test_search_in_chat_builds_search_request(gw: TelethonGateway):
     )
     request = stub.requests[0]
     assert isinstance(request, functions.messages.SearchRequest)
-    assert (request.q, request.top_msg_id, request.from_id, request.limit) == ("lizing", 7, 333, 20)
+    assert (request.q, request.top_msg_id, request.limit) == ("lizing", 7, 20)
+    assert request.from_id == types.InputPeerUser(user_id=333, access_hash=1)
     assert request.min_date == datetime(2026, 10, 1, tzinfo=UTC)
     assert request.max_date == datetime(2026, 10, 3, tzinfo=UTC)
     assert [h.id for h in hits] == [5]
@@ -308,3 +311,112 @@ async def test_mapping_bug_is_internal_error_with_traceback(
     assert str(caught.value) == "Internal error in the Telegram gateway: ValidationError."
     record = next(r for r in caplog.records if r.message == "internal gateway error")
     assert record.exc_info is not None
+
+
+async def test_unseen_numeric_sender_is_unknown_sender(gw: TelethonGateway):
+    stub = _stub(gw)
+
+    async def unknown(value: Any) -> Any:
+        raise ValueError(f"Could not find the input entity for {value}")
+
+    stub.get_input_entity = unknown  # type: ignore[method-assign]
+    with pytest.raises(GatewayError, match="Unknown sender: pass a user id or @username"):
+        await gw._input_user(stub, "999")
+
+
+async def test_history_fills_the_page_past_service_messages(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["plain"] = [_m(10), _service(9), _m(8), _service(7), _m(6), _m(5), _m(4)]
+    out = await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=3)
+    assert [m.id for m in out] == [10, 8, 6]
+    assert stub.iter_calls[-1]["limit"] is None
+
+
+async def test_history_safety_stop_returns_what_it_has(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["plain"] = [_m(30), *(_service(i) for i in range(29, 10, -1)), _m(10)]
+    out = await gw.history(FORUM_ID, topic=None, before_id=None, since=None, until=WHEN, limit=2)
+    assert [m.id for m in out] == [30]  # stopped after 2 * 4 raw messages
+
+
+async def test_history_stops_at_since(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["plain"] = [_m(3), _m(2)]
+    out = await gw.history(
+        FORUM_ID,
+        topic=None,
+        before_id=None,
+        since=datetime(2030, 1, 1, tzinfo=UTC),
+        until=WHEN,
+        limit=5,
+    )
+    assert out == []
+
+
+async def test_search_global_fills_the_page_and_keeps_since(gw: TelethonGateway):
+    stub = _stub(gw)
+    stub.messages["plain"] = [_m(10), _service(9), _m(8), _m(7)]
+    out = await gw.search_global("x", since=None, until=None, limit=2)
+    assert [m.id for m in out] == [10, 8]
+    assert stub.iter_calls[-1]["limit"] is None
+    later = await gw.search_global("x", since=date(2030, 1, 1), until=None, limit=2)
+    assert later == []
+
+
+class LoginClient:
+    """Stands in for TelegramClient in interactive_login."""
+
+    error: Exception | None = None
+    disconnects = 0
+
+    def __init__(self, session: str, api_id: int, api_hash: str) -> None:
+        self.session = session
+
+    async def start(self) -> None:
+        if LoginClient.error is not None:
+            raise LoginClient.error
+
+    async def get_me(self) -> Any:
+        return types.User(id=100, first_name="Slava", username="slava", access_hash=1)
+
+    async def disconnect(self) -> None:
+        LoginClient.disconnects += 1
+
+
+@pytest.fixture
+def login_settings(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setattr(gateway, "TelegramClient", LoginClient)
+    LoginClient.error = None
+    LoginClient.disconnects = 0
+    return Settings(api_id=1, api_hash="a", hidden_chats=(), expected_user=None, home=tmp_path)
+
+
+async def test_login_maps_wrong_api_key(login_settings: Settings):
+    LoginClient.error = errors.ApiIdInvalidError(request=None)
+    with pytest.raises(ApiKeyError, match=r"tgmcp login --reset"):
+        await gateway.interactive_login(login_settings)
+    assert LoginClient.disconnects == 1
+
+
+async def test_login_maps_three_wrong_codes(login_settings: Settings):
+    LoginClient.error = RuntimeError("3 consecutive sign-in attempts failed. Aborting")
+    with pytest.raises(GatewayError) as caught:
+        await gateway.interactive_login(login_settings)
+    assert str(caught.value) == "The code was wrong three times: run `tgmcp login` again."
+
+
+@pytest.mark.parametrize(
+    "error", [errors.AuthKeyDuplicatedError(request=None), errors.AuthKeyUnregisteredError(None)]
+)
+async def test_login_removes_a_dead_session(login_settings: Settings, error: Exception):
+    login_settings.session_path.write_text("old", encoding="utf-8")
+    LoginClient.error = error
+    with pytest.raises(GatewayError, match="it was removed"):
+        await gateway.interactive_login(login_settings)
+    assert not login_settings.session_path.exists()
+    assert LoginClient.disconnects == 1
+
+
+async def test_login_returns_the_account(login_settings: Settings):
+    account = await gateway.interactive_login(login_settings)
+    assert (account.name, account.username) == ("Slava", "slava")

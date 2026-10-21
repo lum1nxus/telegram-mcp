@@ -78,6 +78,8 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     except ValueError as exc:
         raise ConfigError("api_id must be a number.") from exc
     hidden = env.get("TGMCP_HIDDEN_CHATS")
+    if hidden is not None and not hidden.strip():  # an empty variable counts as unset
+        hidden = None
     expected = env.get("TGMCP_EXPECTED_USER") or data.get("expected_user")
     return Settings(
         api_id=api_id_int,
@@ -88,22 +90,40 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
     )
 
 
+def _owner() -> str:
+    """The Windows account name for icacls; `whoami` when USERNAME is empty."""
+    user = os.environ.get("USERNAME", "").strip()
+    if user:
+        return user
+    found = subprocess.run(["whoami"], capture_output=True, text=True, encoding="utf-8", check=True)
+    return found.stdout.strip()
+
+
 def restrict_to_owner(path: Path) -> None:
+    """Only the current user may read or change `path` (a folder or a file)."""
     if sys.platform == "win32":
-        user = os.environ.get("USERNAME", "")
+        # The inheritance flags (OI)(CI) are for folders; on a file they leave an empty ACL.
+        rights = "(OI)(CI)F" if path.is_dir() else "F"
         subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(OI)(CI)F"],
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{_owner()}:{rights}"],
             encoding="utf-8",
             capture_output=True,
             check=True,
         )
     else:
-        path.chmod(0o700)
+        path.chmod(0o700 if path.is_dir() else 0o600)
+
+
+def ensure_home(home: Path) -> Path:
+    """Create the data folder restricted to the owner; an existing folder is left as it is."""
+    if not home.exists():
+        home.mkdir(parents=True)
+        restrict_to_owner(home)
+    return home
 
 
 def save_credentials(api_id: int, api_hash: str, home: Path) -> None:
-    home.mkdir(parents=True, exist_ok=True)
-    restrict_to_owner(home)
+    ensure_home(home)
     path = home / "config.json"
     old = _read_file(path)
     data = {
@@ -112,4 +132,15 @@ def save_credentials(api_id: int, api_hash: str, home: Path) -> None:
         "hidden_chats": old.get("hidden_chats", []),
         "expected_user": old.get("expected_user"),
     }
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def forget_credentials(home: Path) -> None:
+    """Drop the API id and hash from config.json, keeping the other settings."""
+    path = home / "config.json"
+    if not path.exists():
+        return
+    data = _read_file(path)
+    data.pop("api_id", None)
+    data.pop("api_hash", None)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
