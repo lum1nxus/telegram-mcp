@@ -4,7 +4,9 @@ tgmcp holds the login key of your Telegram account. Treat it like a password man
 
 ## Reporting a vulnerability
 
-Please do not open a public issue. Use GitHub's private vulnerability reporting (the "Security" tab of the repository, "Report a vulnerability"). Include what you saw, the steps to reproduce and your Windows and Python versions. Never include a real `secrets.bin`, session string or chat content.
+Please do not open a public issue. Use GitHub's private vulnerability reporting (the "Security" tab of the repository, "Report a vulnerability"). Include what you saw, the steps to reproduce and your Windows and Python versions. Never include a real `secrets.bin`, session string or chat content. You will get an answer within a week.
+
+In scope: anything that lets the server write to the account, leak the session or the API hash, write chat text to disk, or reach a network destination other than Telegram. Out of scope: the security of the Telegram account itself (use two-step verification and review Settings, Devices in the Telegram app).
 
 ## Install only from this repository
 
