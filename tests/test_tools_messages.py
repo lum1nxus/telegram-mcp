@@ -689,7 +689,7 @@ async def test_empty_query_with_a_known_sender_lists_their_messages(
     assert data["queries_tried"] == []
 
 
-async def test_search_timeout_suggests_expand_false(
+async def test_search_timeout_suggests_dropping_expand(
     call: Call, seed: FakeGateway, monkeypatch: Any
 ) -> None:
     monkeypatch.setattr(server, "TOOL_TIMEOUT_S", 0.01)
@@ -703,7 +703,7 @@ async def test_search_timeout_suggests_expand_false(
     result = await call("search_messages", {"query": "трактор", "chat": "Garden Club"})
     assert result.is_error
     assert _text(result).endswith(
-        "search_messages took longer than 30 seconds; try expand=false or a smaller limit."
+        "search_messages took longer than 30 seconds; try a smaller limit, or drop expand=true."
     )
     monkeypatch.setattr(seed, "history", slow)
     result = await call("get_messages", {"chat": "Garden Club"})

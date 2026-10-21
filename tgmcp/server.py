@@ -81,7 +81,7 @@ def guarded[**P, R](
                 raise ToolError(str(e)) from e
             except TimeoutError as e:
                 hint = (
-                    "expand=false or a smaller limit"
+                    "a smaller limit, or drop expand=true"
                     if tool_name == "search_messages"
                     else "a smaller limit"
                 )
