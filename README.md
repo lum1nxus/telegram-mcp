@@ -46,16 +46,16 @@ Other commands: `tgmcp logout` ends the login on Telegram and deletes the sessio
 
 ## Tools
 
-Every tool is annotated `read-only: yes, open world: no`.
+Every tool is read-only and does not reach beyond your account (annotations: read-only yes, open world no).
 
-| Tool | Arguments (defaults) | Annotations |
-|---|---|---|
-| `list_chats` | `query` (none), `kind` (none: user, group or channel), `include_archived` (false), `limit` (50, 1 to 200) | read-only: yes, open world: no |
-| `get_chat` | `chat` (id, @username, title or part of it) | read-only: yes, open world: no |
-| `list_topics` | `chat`, `limit` (100, 1 to 200) | read-only: yes, open world: no |
-| `search_messages` | `query`, `chat` (none: all chats), `topic` (none), `sender` (none: user id or @username), `since` (none, date), `until` (none, date), `limit` (30, 1 to 100) | read-only: yes, open world: no |
-| `get_messages` | `chat`, `topic` (none), `since` (none), `until` (none), `before_id` (none), `limit` (50, 1 to 100) | read-only: yes, open world: no |
-| `get_message_context` | `chat`, `message_id`, `before` (10, 0 to 30), `after` (10, 0 to 30) | read-only: yes, open world: no |
+| Tool | Arguments (defaults) |
+|---|---|
+| `list_chats` | `query` (none), `kind` (none: user, group or channel), `include_archived` (false), `limit` (50, 1 to 200) |
+| `get_chat` | `chat` (id, @username, title or part of it) |
+| `list_topics` | `chat`, `limit` (100, 1 to 200) |
+| `search_messages` | `query` (not empty), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none: user id or @username; needs `chat`), `since` (none, a date), `until` (none, a date), `limit` (30, 1 to 100) |
+| `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
+| `get_message_context` | `chat`, `message_id` (at least 1), `before` (10, 0 to 30), `after` (10, 0 to 30) |
 
 ## Search semantics
 
@@ -73,7 +73,7 @@ Everything lives in one folder: `%LOCALAPPDATA%\telegram-mcp` on Windows (or the
 - `telegram.session`: the saved login.
 - `tgmcp.log`: a technical log without message text.
 
-The session file is the account: anyone who copies it is logged in as you. Keep it out of git, backups you share and cloud folders. `tgmcp login` restricts the folder to your Windows user. If it leaks, run `tgmcp logout`, or end the session in Telegram under Settings, Devices.
+The session file is the account: anyone who copies it is logged in as you. Keep it out of git, backups you share and cloud folders. `tgmcp login` restricts the session file to your user. The folder itself is restricted when `tgmcp login` first saves your API id and hash there. If it leaks, run `tgmcp logout`, or end the session in Telegram under Settings, Devices.
 
 ## Several Claude sessions and the VPN caveat
 

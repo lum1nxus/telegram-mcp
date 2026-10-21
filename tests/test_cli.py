@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import pytest
+from telethon.sessions import SQLiteSession
 
 from tests.factories import make_chat
 from tests.fake_gateway import FakeGateway
 from tgmcp import cli
 from tgmcp.config import Settings
+from tgmcp.gateway import GatewayError
 from tgmcp.models import Account
 
 
@@ -62,6 +64,7 @@ def test_whoami_prints_account_counts_and_hidden(env, capsys, monkeypatch):
     assert "  hidden: Secret (2)" in lines
     assert "  hidden: Ghost (not found)" in lines
     assert lines[-1] == f"home: {env}"
+    assert "close" in fake.calls
 
 
 def test_whoami_without_session_exits_2(env, capsys):
@@ -99,8 +102,15 @@ def test_login_prompts_for_missing_credentials(env, capsys, monkeypatch):
 def test_login_rejects_non_numeric_id_three_times(env, capsys, monkeypatch):
     monkeypatch.delenv("TGMCP_API_ID")
     monkeypatch.delenv("TGMCP_API_HASH")
-    monkeypatch.setattr("builtins.input", lambda prompt="": "abc")
+    prompts: list[str] = []
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "abc"
+
+    monkeypatch.setattr("builtins.input", answer)
     assert cli.main(["login"]) == 1
+    assert len(prompts) == 3
     assert "number" in capsys.readouterr().err
 
 
@@ -135,3 +145,57 @@ def test_serve_runs_server_and_returns_0(env, monkeypatch):
     monkeypatch.setattr(cli.logging_setup, "configure", lambda path: None)
     assert cli.main(["serve"]) == 0
     assert ran == [True]
+
+
+def test_logout_removes_session_even_when_telegram_fails(env, capsys, monkeypatch):
+    async def failing_end(settings: Settings) -> None:
+        raise OSError("down")
+
+    monkeypatch.setattr(cli, "end_session", failing_end)
+    session = env / "telegram.session"
+    session.write_text("x", encoding="utf-8")
+    assert cli.main(["logout"]) == 0
+    assert not session.exists()
+    assert "Telegram did not confirm" in capsys.readouterr().out
+
+
+def test_aborted_login_removes_session_without_auth_key(env, monkeypatch):
+    async def aborted(settings: Settings) -> Account:
+        SQLiteSession(str(settings.session_path)).close()  # what Telethon leaves before the code
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "interactive_login", aborted)
+    cli.main(["login"])
+    assert not (env / "telegram.session").exists()
+
+
+def test_login_failure_prints_sentence_and_exits_1(env, capsys, monkeypatch):
+    async def failing(settings: Settings) -> Account:
+        raise GatewayError("The code was wrong or expired: run `tgmcp login` again.")
+
+    monkeypatch.setattr(cli, "interactive_login", failing)
+    assert cli.main(["login"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "code was wrong" in err
+
+
+def test_login_empty_hash_reprompts_then_gives_up(env, capsys, monkeypatch):
+    monkeypatch.delenv("TGMCP_API_ID")
+    monkeypatch.delenv("TGMCP_API_HASH")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "42")
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "")
+    assert cli.main(["login"]) == 1
+    assert "cannot be empty" in capsys.readouterr().err
+
+
+def test_login_without_terminal_input_exits_1(env, capsys, monkeypatch):
+    monkeypatch.delenv("TGMCP_API_ID")
+    monkeypatch.delenv("TGMCP_API_HASH")
+
+    def eof(prompt: str = "") -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    assert cli.main(["login"]) == 1
+    assert "interactive terminal" in capsys.readouterr().err

@@ -628,6 +628,16 @@ async def interactive_login(settings: Settings) -> Account:
     try:
         await client.start()
         me = await client.get_me()
+    except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError) as e:
+        raise GatewayError("The code was wrong or expired: run `tgmcp login` again.") from e
+    except (errors.SessionPasswordNeededError, errors.PasswordHashInvalidError) as e:
+        raise GatewayError("The two-step password was wrong: run `tgmcp login` again.") from e
+    except errors.PhoneNumberInvalidError as e:
+        raise GatewayError("That phone number is not valid.") from e
+    except errors.FloodWaitError as e:
+        raise Busy(seconds=int(e.seconds)) from e
+    except OSError as e:
+        raise GatewayError("Could not reach Telegram: check the network and try again.") from e
     finally:
         await client.disconnect()
     return Account(id=me.id, name=utils.get_display_name(me), username=me.username)
@@ -636,8 +646,8 @@ async def interactive_login(settings: Settings) -> Account:
 async def end_session(settings: Settings) -> None:
     """The only place the file session is opened for writing: ends the login on Telegram."""
     client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash)
-    await client.connect()
     try:
+        await client.connect()
         await client.log_out()
     finally:
         await client.disconnect()

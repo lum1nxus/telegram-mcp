@@ -5,6 +5,7 @@ import asyncio
 import getpass
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from tgmcp import logging_setup
 from tgmcp.config import (
@@ -21,7 +22,9 @@ from tgmcp.gateway import (
     end_session,
     factory,
     interactive_login,
+    load_session_string,
 )
+from tgmcp.models import Chat
 from tgmcp.resolve import Directory
 from tgmcp.server import build_server
 
@@ -38,18 +41,31 @@ def _complain(text: str) -> None:
 
 def _ask_credentials() -> Settings | None:
     """Prompt for the API id and hash, save them, and load the settings again."""
-    for _ in range(ATTEMPTS):
-        raw = input("API id: ").strip()
-        if raw.isdecimal():
+    try:
+        for _ in range(ATTEMPTS):
+            raw = input("API id: ").strip()
+            if not raw.isdecimal():
+                _complain("The API id must be a number.")
+                continue
             api_hash = getpass.getpass("API hash: ").strip()
             if not api_hash:
                 _complain("The API hash cannot be empty.")
-                return None
+                continue
             save_credentials(int(raw), api_hash, home())
             return load_settings()
-        _complain("The API id must be a number.")
+    except EOFError:
+        _complain("No terminal input: run `tgmcp login` in an interactive terminal.")
+        return None
     _complain("Too many wrong answers; run `tgmcp login` again.")
     return None
+
+
+def _discard_unfinished(path: Path) -> None:
+    """Remove a session file left by an aborted login (one without an auth key)."""
+    try:
+        load_session_string(path)
+    except NotLoggedIn:
+        path.unlink(missing_ok=True)
 
 
 def _login() -> int:
@@ -61,11 +77,26 @@ def _login() -> int:
             return 1
         settings = asked
     settings.home.mkdir(parents=True, exist_ok=True)
-    account = asyncio.run(interactive_login(settings))
+    try:
+        account = asyncio.run(interactive_login(settings))
+    except BaseException as exc:
+        _discard_unfinished(settings.session_path)
+        if isinstance(exc, GatewayError):
+            _complain(str(exc))
+            return 1
+        raise
     if settings.session_path.exists():
         restrict_to_owner(settings.session_path)
     _say(f"logged in as {account.name}")
     return 0
+
+
+def _keys(chat: Chat) -> set[str]:
+    """The spellings a hidden-chat entry may use for this chat (as Directory matches them)."""
+    keys = {str(chat.id), chat.title.lower()}
+    if chat.username:
+        keys |= {chat.username.lower(), f"@{chat.username.lower()}"}
+    return keys
 
 
 async def _whoami(settings: Settings) -> int:
@@ -82,7 +113,7 @@ async def _whoami(settings: Settings) -> int:
     _say(f"account: {me.name}{handle}")
     _say(f"chats: {len(visible)} (archived {archived}, hidden {hidden})")
     for entry in settings.hidden_chats:
-        found = [c for c in dialogs if Directory(gateway, [entry]).is_hidden(c)]
+        found = [c for c in dialogs if entry.strip().lower() in _keys(c)]
         if found:
             for chat in found:
                 _say(f"  hidden: {chat.title} ({chat.id})")
@@ -124,9 +155,19 @@ def _logout() -> int:
     if not settings.session_path.exists():
         _say("no session to log out")
         return 0
-    asyncio.run(end_session(settings))
+    try:
+        asyncio.run(end_session(settings))
+        confirmed = True
+    except Exception:  # revoked key, bad file, no network: the file goes anyway
+        confirmed = False
     settings.session_path.unlink(missing_ok=True)
-    _say("logged out")
+    if confirmed:
+        _say("logged out")
+    else:
+        _say(
+            "logged out (Telegram did not confirm; also end the session under "
+            "Settings → Devices in the Telegram app)"
+        )
     return 0
 
 
