@@ -11,7 +11,7 @@ Every tool only reads, and is marked read-only and closed-world for the client. 
 | `list_chats` | `query` (none), `kind` (none; `user`, `group` or `channel`), `include_archived` (false), `limit` (50; 1 to 200) |
 | `get_chat` | `chat` |
 | `list_topics` | `chat`, `limit` (100; 1 to 200) |
-| `search_messages` | `query` (required), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none; needs `chat`), `since` (none; a date), `until` (none; a date), `limit` (30; 1 to 100), `expand` (true) |
+| `search_messages` | `query` (required), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none; needs `chat`), `since` (none; a date), `until` (none; a date), `limit` (30; 1 to 100), `expand` (false) |
 | `get_messages` | `chat`, `topic` (none), `since` (none; a date and time), `until` (none; a date and time), `before_id` (none; at least 1), `limit` (50; 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10; 0 to 30), `after` (10; 0 to 30) |
 
@@ -37,7 +37,7 @@ A message sent just after your local midnight may belong to the previous UTC day
 
 ## Search
 
-Telegram's search matches the beginnings of words, not fragments, and every word of a query must be in the message: "market" finds "marketing" but not "supermarket", and "фруктовая компания" misses "угостил фруктом". So `search_messages` does not send the query once. It sends a short series of queries, one at a time, and stops at the first that finds something:
+Telegram's search matches the beginnings of words, not fragments, and every word of a query must be in the message: "market" finds "marketing" but not "supermarket", and "фруктовая компания" misses "угостил фруктом". By default `search_messages` sends the query once, as written. With `expand=true` it sends a short series of queries instead, one at a time, and stops at the first that finds something:
 
 1. every word cut to its stem: "фруктовая компания" becomes "фрукт компан", which also finds "фруктом" and "компании";
 2. with three or more words, the two rarest words (a number, an @name or a capitalised name counts as rarer than a common word, then a longer word);
@@ -47,9 +47,9 @@ Telegram's search matches the beginnings of words, not fragments, and every word
 
 The budget is 6 Telegram queries for one chat and 4 for a search across all chats, which is heavier for Telegram. A query that repeats an earlier one is not sent. At most 8 words of a query are used, fewer if together they pass 200 characters.
 
-Every result lists the queries in `queries_tried`, in order, each with its number of hits on the first page Telegram returned (at most `limit`). Hits from hidden chats are dropped before they are counted, so `queries_tried` never shows that a hidden chat matched. Hits are merged without repeats, newest first, and cut to `limit`; `truncated` is true when one query filled a page or the merged hits passed `limit`. When nothing was found, the note says how many queries were tried. `query` in the result is the query as you wrote it.
+With `expand=true` every result lists the queries in `queries_tried`, in order, each with its number of hits on the first page Telegram returned (at most `limit`). Hits from hidden chats are dropped before they are counted, so `queries_tried` never shows that a hidden chat matched. Hits are merged without repeats, newest first, and cut to `limit`; `truncated` is true when one query filled a page or the merged hits passed `limit`. When nothing was found, the note says how many queries were tried. `query` in the result is the query as you wrote it.
 
-`expand=false` sends the query once, as written, and returns an empty `queries_tried`.
+Without `expand=true` (the default) the query is sent once and `queries_tried` is empty. The cascade is opt-in: the model gets it only by passing `expand=true`.
 
 Whether Telegram itself ignores Polish diacritics (and "ł") when it matches is an assumption not yet checked on a real account: the variant without diacritics only helps when the message is written without them.
 

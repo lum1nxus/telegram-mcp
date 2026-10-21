@@ -380,8 +380,8 @@ def test_question_rules_are_satisfiable_on_the_seed() -> None:
             assert preds["chat"](None) and not preds["chat"]("Garden Club")
         else:
             assert preds["chat"]("Garden Club") and preds["chat"]("-1009")
-        assert all(preds["expand"](v) for v in (None, True, "true"))
-        assert not any(preds["expand"](v) for v in (False, "false"))
+        assert preds["expand"](True)
+        assert not any(preds["expand"](v) for v in (None, False, "false"))
         terms = [
             t
             for term in q.answer_must_contain
@@ -528,23 +528,23 @@ IDEAL: dict[str, tuple[list[tuple[str, dict[str, Any]]], str]] = {
         "Tak, w Hiking Club 19.10.2026: «Ridge trail closed».",
     ),
     "search-1": (
-        [("search_messages", {"query": "теплицы", **GARDEN})],
+        [("search_messages", {"query": "теплицы", **GARDEN, "expand": True})],
         "В Garden Club Dana написала: «Tomek поделился теплицей с соседями» (21.10.2026).",
     ),
     "search-2": (
-        [("search_messages", {"query": "Томек", **GARDEN})],
+        [("search_messages", {"query": "Томек", **GARDEN, "expand": True})],
         "Tomek поделился теплицей с соседями (Garden Club, 21.10.2026).",
     ),
     "search-3": (
-        [("search_messages", {"query": "теплицы"})],
+        [("search_messages", {"query": "теплицы", "expand": True})],
         "Tomek поделился теплицей с соседями (чат -1009, 21.10.2026).",
     ),
     "search-4": (
-        [("search_messages", {"query": "odmowila", **GARDEN})],
+        [("search_messages", {"query": "odmowila", **GARDEN, "expand": True})],
         "W Garden Club Dana napisała «Zielona firma odmówiła» (21.10.2026).",
     ),
     "search-5": (
-        [("search_messages", {"query": "компании", **GARDEN})],
+        [("search_messages", {"query": "компании", **GARDEN, "expand": True})],
         "В Garden Club упоминали GreenCo: «компания GreenCo ответила через неделю» (21.10.2026).",
     ),
 }
@@ -615,7 +615,7 @@ async def test_skipping_the_second_page_fails_the_tools(bench_server: MCPServer)
 
 
 async def test_an_exact_search_that_finds_nothing_fails(bench_server: MCPServer) -> None:
-    exact = {"query": "тепличная", **GARDEN, "expand": False}
+    exact = {"query": "тепличная", **GARDEN}
     backend = FakeBackend(
         [turn("", ToolCall("c0", "search_messages", exact)), turn("Ничего не найдено.")]
     )
@@ -636,7 +636,7 @@ def test_search_questions_name_their_measure() -> None:
 
 
 async def test_the_transliteration_question_needs_the_cascade(bench_server: MCPServer) -> None:
-    exact = {"query": "Томек", **GARDEN, "expand": False}
+    exact = {"query": "Томек", **GARDEN}
     backend = FakeBackend(
         [turn("", ToolCall("c0", "search_messages", exact)), turn("Ничего не найдено.")]
     )

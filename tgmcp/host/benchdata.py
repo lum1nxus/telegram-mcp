@@ -377,8 +377,8 @@ _GARDEN_CHAT = _has("garden", "-1009")
 
 
 def _expanded(value: object) -> bool:
-    """`expand` left out (None) or true: the server's search cascade ran."""
-    return value is None or _is(True)(value)
+    """`expand` is true: the model opted in to the server's search cascade."""
+    return _is(True)(value)
 
 
 def _no_chat(value: object) -> bool:
@@ -413,7 +413,7 @@ def _q(
 
 
 def _search_q(id: str, text: str, query: Rule, must: list[Term]) -> Question:
-    """A search question over Garden Club: one search with the cascade left on."""
+    """A search question over Garden Club: one search with the cascade opted in (expand=true)."""
     rules = {"query": query, "chat": _GARDEN_CHAT, "expand": _expanded}
     return _q(id, text, [("search_messages", rules)], must)
 
@@ -618,7 +618,8 @@ QUESTIONS: list[Question] = [
         [("search_messages", {"query": _has("ridge", "trail", "closed"), "chat": _HIKING})],
         [("Ridge", "closed")],
     ),
-    # search: over -1009, each answer term comes from the hit, never from the question
+    # search: over -1009; the model must opt in with expand=true.
+    # Each answer term comes from the hit, never from the question.
     _search_q(
         "search-1",
         "Что писали про теплицы в Garden Club?",  # another form: "теплицей"
@@ -632,7 +633,7 @@ QUESTIONS: list[Question] = [
         [("теплицей", "соседями")],
     ),
     # No `chat`: the global cascade. Checked against the fake: the ideal run finds -1009/5,
-    # and expand=False with "теплицы" finds nothing, so the stem step is still measured.
+    # and a search without expand with "теплицы" finds nothing, so the stem step is still measured.
     _q(
         "search-3",
         "Где упоминали теплицы?",
