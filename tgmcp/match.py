@@ -3,8 +3,9 @@
 Pure and deterministic: no I/O, no state. The scan builds one predicate per call with
 `matcher` (the query is folded and the pattern compiled once) and applies it to each message.
 
-- `fold` lower-cases, strips diacritics (NFD, combining marks dropped) and maps ł→l, ё→е, so
-  "Zażółć" and "zazolc" compare equal.
+- `fold` lower-cases and maps an explicit table of accented letters (Polish, ё→е, common Latin
+  accents, ß→ss), so "Zażółć" and "zazolc" compare equal; every other letter is kept (й stays
+  й, distinct from и).
 - `fragment` is a folded substring ("трактор" finds "минитрактор").
 - `words` needs every query word to be a whole word of the text, in any order.
 - `tolerance` (ruling 3) compares each query word with whole text words: a trigram Jaccard
@@ -17,7 +18,6 @@ Pure and deterministic: no I/O, no state. The scan builds one predicate per call
 """
 
 import re
-import unicodedata
 from collections.abc import Callable
 
 MAX_PATTERN_CHARS = 200
@@ -33,6 +33,27 @@ _ESCAPE = re.compile(r"\\.", re.DOTALL)
 _CHAR_CLASS = re.compile(r"\[\^?\]?[^\]]*\]")
 _UNBOUNDED = re.compile(r"[+*]|\{\d*,\}")
 
+_FOLD_TABLE = str.maketrans(
+    {
+        **dict.fromkeys("ą", "a"),
+        **dict.fromkeys("ć", "c"),
+        **dict.fromkeys("ę", "e"),
+        **dict.fromkeys("ł", "l"),
+        **dict.fromkeys("ń", "n"),
+        **dict.fromkeys("ó", "o"),
+        **dict.fromkeys("ś", "s"),
+        **dict.fromkeys("źż", "z"),
+        **dict.fromkeys("ё", "е"),
+        **dict.fromkeys("àáâä", "a"),
+        **dict.fromkeys("èéêë", "e"),
+        **dict.fromkeys("ìíîï", "i"),
+        **dict.fromkeys("òôö", "o"),
+        **dict.fromkeys("ùúûü", "u"),
+        **dict.fromkeys("ç", "c"),
+        **dict.fromkeys("ñ", "n"),
+        **dict.fromkeys("ß", "ss"),
+    }
+)
 _FOREVER = "That pattern could run forever; simplify it."
 _TOO_LONG = f"The pattern is longer than {MAX_PATTERN_CHARS} characters."
 
@@ -42,10 +63,8 @@ class PatternRefused(ValueError):  # noqa: N818 - name fixed by the interface
 
 
 def fold(text: str) -> str:
-    """Lower-case, strip combining marks, map ł→l and ё→е."""
-    decomposed = unicodedata.normalize("NFD", text.lower())
-    stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
-    return stripped.replace("ł", "l").replace("ё", "е")
+    """Lower-case and map the accented letters of `_FOLD_TABLE`; nothing else changes."""
+    return text.lower().translate(_FOLD_TABLE)
 
 
 def words_of(text: str) -> list[str]:

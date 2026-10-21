@@ -26,6 +26,10 @@ from tgmcp.match import (
     ("text", "folded"),
     [
         ("Zażółć", "zazolc"),
+        ("Zażółć gęślą jaźń", "zazolc gesla jazn"),
+        ("naïve", "naive"),
+        ("Straße", "strasse"),
+        ("теплицей", "теплицей"),
         ("Ёлка", "елка"),
         ("Łódź", "lodz"),
         ("TEPLICA", "teplica"),
@@ -39,12 +43,12 @@ def test_fold_table(text: str, folded: str) -> None:
 
 
 def test_fold_keeps_cyrillic_short_i() -> None:
-    # й decomposes to и + breve under NFD; the breve is dropped like any combining mark.
-    assert fold("Чайник") == "чаиник"
+    assert fold("Чайник") == "чайник"
+    assert fold("й") != fold("и")
 
 
 def test_words_of_splits_on_non_word_characters() -> None:
-    assert words_of("Tomek, поделился: теплицей!") == ["tomek", "поделился", "теплицеи"]
+    assert words_of("Tomek, поделился: теплицей!") == ["tomek", "поделился", "теплицей"]
 
 
 def test_trigrams_padding_and_short_words() -> None:
