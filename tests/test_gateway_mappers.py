@@ -177,7 +177,12 @@ def test_other_errors_are_sentences():
     assert str(empty) == "Global search needs a query."
     rpc = map_error(errors.RPCError(request=None, message="WHATEVER", code=400))
     assert str(rpc) == "Telegram refused the request: RPCError."
-    assert isinstance(map_error(ConnectionError("down")), GatewayError)
+    down = map_error(ConnectionError("down"))
+    assert str(down) == "Could not talk to Telegram: ConnectionError."
+    unknown = map_error(ValueError("Cannot find any entity corresponding to x"))
+    assert str(unknown) == "Unknown sender: pass a user id or @username from this chat."
+    bug = map_error(KeyError("k"))
+    assert str(bug) == "Internal error in the Telegram gateway: KeyError."
     same = GatewayError("kept")
     assert map_error(same) is same
 
@@ -222,3 +227,22 @@ def test_sender_name_from_known_entity():
     m._finish_init(client, {333: ola}, None)
     out = message_from_telethon(m, -1, is_forum=False, public_username=None)
     assert (out.sender_id, out.sender_name) == (333, "Ola K")
+
+
+def test_video_sticker_is_a_sticker():
+    doc = types.Document(
+        id=1,
+        access_hash=2,
+        file_reference=b"",
+        date=WHEN,
+        mime_type="video/webm",
+        size=10,
+        dc_id=2,
+        attributes=[
+            types.DocumentAttributeVideo(duration=1, w=512, h=512),
+            types.DocumentAttributeSticker(alt="x", stickerset=types.InputStickerSetEmpty()),
+        ],
+    )
+    media = types.MessageMediaDocument(document=doc)
+    out = message_from_telethon(_msg(media=media), -1, is_forum=False, public_username=None)
+    assert out.media_kind == "sticker"

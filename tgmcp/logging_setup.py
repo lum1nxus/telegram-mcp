@@ -8,6 +8,7 @@ from pathlib import Path
 from tgmcp.gateway import LIBRARY_LOGGER
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_installed: list[logging.Handler] = []
 
 
 def configure(log_path: Path, level: str = "INFO") -> None:
@@ -17,7 +18,13 @@ def configure(log_path: Path, level: str = "INFO") -> None:
     to_file = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     root = logging.getLogger()
     root.setLevel(level)
+    # Idempotent: a second call replaces the handlers of the first.
+    for old in _installed:
+        root.removeHandler(old)
+        old.close()
+    _installed.clear()
     for handler in (stderr, to_file):
         handler.setFormatter(formatter)
         root.addHandler(handler)
+        _installed.append(handler)
     logging.getLogger(LIBRARY_LOGGER).setLevel(logging.WARNING)

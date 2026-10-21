@@ -47,3 +47,25 @@ def test_logging_never_writes_stdout(tmp_path: Path, capsys: pytest.CaptureFixtu
             if handler not in before:
                 root.removeHandler(handler)
                 handler.close()
+
+
+def test_corrupt_session_is_not_logged_in(tmp_path: Path):
+    path = tmp_path / "telegram.session"
+    path.write_bytes(b"this is not a sqlite database" * 100)
+    with pytest.raises(NotLoggedIn, match="unreadable"):
+        load_session_string(path)
+
+
+def test_configure_twice_does_not_duplicate(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        logging_setup.configure(tmp_path / "a.log")
+        logging_setup.configure(tmp_path / "a.log")
+        logging.getLogger("tgmcp.test").info("once only")
+        assert capsys.readouterr().err.count("once only") == 1
+    finally:
+        for handler in root.handlers:
+            if handler not in before:
+                root.removeHandler(handler)
+                handler.close()

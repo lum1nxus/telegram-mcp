@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sqlite3
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -99,13 +100,8 @@ class Gateway(Protocol):
 
 
 # --- Telethon objects -> models -------------------------------------------------------------
-# A few read-only Telethon properties (`sender`, `sender_id`, `forward`) share a substring with
-# the write-word guard in tests/test_read_only_contract.py. They are read through `_prop`, a plain
-# getattr on a property, never a call; nothing here writes to Telegram.
-
-
-def _prop(obj: Any, name: str) -> Any:
-    return getattr(obj, name, None)
+# `sender`, `sender_id` and `forward` are read-only Telethon properties; the contract test
+# allowlists exactly these attribute names.
 
 
 def chat_from_dialog(d: Any) -> Chat:
@@ -136,21 +132,18 @@ def _topic_id(m: Any, is_forum: bool) -> int | None:
     return 1 if is_forum else None
 
 
-_MEDIA_ORDER: tuple[tuple[str, MediaKind], ...] = (
-    ("photo", "photo"),
-    ("voice", "voice"),
-    ("video", "video"),
-    ("video_note", "video"),
-    ("gif", "video"),
-    ("sticker", "sticker"),
-    ("document", "document"),
-)
-
-
 def _media_kind(m: Any) -> MediaKind | None:
     if m.media is None or isinstance(m.media, types.MessageMediaWebPage):
         return None
-    return next((kind for prop, kind in _MEDIA_ORDER if getattr(m, prop, None)), "other")
+    # Sticker before video: a video sticker is both.
+    checks: tuple[tuple[Any, MediaKind], ...] = (
+        (m.photo, "photo"),
+        (m.voice, "voice"),
+        (m.sticker, "sticker"),
+        (m.video or m.video_note or m.gif, "video"),
+        (m.document, "document"),
+    )
+    return next((kind for present, kind in checks if present), "other")
 
 
 def _name(entity: Any) -> str | None:
@@ -162,10 +155,10 @@ def _fwd_origin(m: Any) -> str | None:
         return None
     if m.fwd_from.from_name:
         return str(m.fwd_from.from_name)
-    fwd = _prop(m, "forward")
+    fwd = m.forward
     if fwd is None:
         return None
-    return _name(_prop(fwd, "sender")) or _name(fwd.chat)
+    return _name(fwd.sender) or _name(fwd.chat)
 
 
 def message_from_telethon(
@@ -177,8 +170,8 @@ def message_from_telethon(
         chat_id=chat_id,
         topic_id=_topic_id(m, is_forum),
         date=m.date,
-        sender_id=_prop(m, "sender_id"),
-        sender_name=_name(_prop(m, "sender")),
+        sender_id=m.sender_id,
+        sender_name=_name(m.sender),
         text=m.raw_text or "",
         reply_to_id=m.reply_to_msg_id,
         has_media=kind is not None,
@@ -211,6 +204,12 @@ _FIXED_ERRORS: tuple[tuple[tuple[type[Exception], ...], type[GatewayError], str]
         "That chat is no longer accessible to this account.",
     ),
     ((errors.SearchQueryEmptyError,), GatewayError, "Global search needs a query."),
+    # Telethon raises ValueError when it cannot resolve an entity (here: the sender).
+    (
+        (ValueError,),
+        GatewayError,
+        "Unknown sender: pass a user id or @username from this chat.",
+    ),
 )
 
 
@@ -225,7 +224,11 @@ def map_error(e: Exception) -> GatewayError:
             return error_cls(sentence)
     if isinstance(e, errors.RPCError):
         return GatewayError(f"Telegram refused the request: {type(e).__name__}.")
-    return GatewayError(f"Could not talk to Telegram: {type(e).__name__}.")
+    if isinstance(e, OSError):  # network errors and timeouts
+        return GatewayError(f"Could not talk to Telegram: {type(e).__name__}.")
+    # Exception messages here carry no chat text, so the traceback may be logged.
+    log.error("internal gateway error", exc_info=e)
+    return GatewayError(f"Internal error in the Telegram gateway: {type(e).__name__}.")
 
 
 class IdleGuard:
@@ -261,28 +264,60 @@ class IdleGuard:
 
 # --- The live gateway ------------------------------------------------------------------------
 
+_UNREADABLE = "The session file is unreadable: run `tgmcp login` again."
+
 
 def load_session_string(path: Path) -> str:
     """The saved login as a string, so the client runs on an in-memory session."""
     if not path.exists():  # SQLiteSession would create an empty file
         raise NotLoggedIn()
-    session = SQLiteSession(str(path))
     try:
-        text: str = StringSession.save(session)
-    finally:
-        session.close()
+        session = SQLiteSession(str(path))
+        try:
+            text: str = StringSession.save(session)
+        finally:
+            session.close()
+    except sqlite3.Error as exc:
+        raise NotLoggedIn(_UNREADABLE) from exc
     if not text or StringSession(text).auth_key is None:
         raise NotLoggedIn()
     return text
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    """A naive datetime is taken as UTC."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=UTC)
+
+
+def _utc_day(day: date) -> date:
+    if isinstance(day, datetime):
+        aware = _aware(day)
+        assert aware is not None
+        return aware.astimezone(UTC).date()
+    return day
+
+
 def _day_start(day: date | None) -> datetime | None:
-    return datetime.combine(day, dtime.min, tzinfo=UTC) if day else None
+    return datetime.combine(_utc_day(day), dtime.min, tzinfo=UTC) if day else None
 
 
 def _day_end(day: date | None) -> datetime | None:
     """Exclusive end: the first instant after `day`."""
-    return datetime.combine(day + timedelta(days=1), dtime.min, tzinfo=UTC) if day else None
+    if not day:
+        return None
+    return datetime.combine(_utc_day(day) + timedelta(days=1), dtime.min, tzinfo=UTC)
+
+
+def _plain(messages: list[Any]) -> list[Any]:
+    """Drop service messages (topic created, member joined): they carry no text."""
+    return [m for m in messages if m is not None and not isinstance(m, types.MessageService)]
+
+
+def _guard_done(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.error("idle guard failed: %s", type(task.exception()).__name__)
 
 
 class TelethonGateway(Gateway):
@@ -298,19 +333,21 @@ class TelethonGateway(Gateway):
         )
         self._lock = asyncio.Lock()
         self._ready = False
+        self._idle_s: float = IDLE_SECONDS
         self._guard: IdleGuard | None = None
         self._guard_task: asyncio.Task[None] | None = None
+        self._in_flight = 0
         self._peers: dict[int, Any] = {}
         self._chats: dict[int, Chat] = {}
 
     # Connection --------------------------------------------------------------------------
 
     async def _client(self) -> Any:
+        """Connect when needed; the caller owns one in-flight slot on success."""
         async with self._lock:
             if not self._ready or not self._tg.is_connected():
                 await self._open()
-            if self._guard is not None:
-                self._guard.touch()
+            self._in_flight += 1
             return self._tg
 
     async def _open(self) -> None:
@@ -326,36 +363,62 @@ class TelethonGateway(Gateway):
                 await self._tg.disconnect()
                 raise NotLoggedIn("This session belongs to another account.")
         self._ready = True
-        self._guard = IdleGuard(IDLE_SECONDS, self._disconnect)
-        self._guard_task = asyncio.create_task(self._guard.run())
+        self._start_guard()
         log.info("connected")
 
-    async def _disconnect(self) -> None:
-        self._ready = False
+    def _stop_guard(self) -> None:
+        if self._guard is not None:
+            self._guard.stop()
+        task = self._guard_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
         self._guard = None
-        await self._tg.disconnect()
+        self._guard_task = None
+
+    def _start_guard(self) -> None:
+        self._stop_guard()
+        self._guard = IdleGuard(self._idle_s, self._on_idle)
+        self._guard_task = asyncio.create_task(self._guard.run())
+        self._guard_task.add_done_callback(_guard_done)
+
+    async def _on_idle(self) -> None:
+        async with self._lock:
+            if self._in_flight:  # a request is running: wait another idle period
+                self._start_guard()
+                return
+            self._ready = False
+            self._guard = None
+            self._guard_task = None
+            await self._tg.disconnect()
         log.info("disconnected after idle")
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[Any]:
         """The connected client; every Telethon error leaves as a GatewayError."""
+        entered = False
         try:
-            yield await self._client()
+            client = await self._client()
+            entered = True
+            yield client
         except Exception as e:
             error = map_error(e)
             log.warning("telegram error %s -> %s", type(e).__name__, type(error).__name__)
             raise error from e
+        finally:
+            if entered:
+                self._in_flight -= 1
+                if self._guard is not None:
+                    self._guard.touch()
 
     async def close(self) -> None:
-        if self._guard is not None:
-            self._guard.stop()
-        if self._guard_task is not None:
-            self._guard_task.cancel()
-        self._guard = None
-        self._guard_task = None
+        """Never raises."""
+        self._stop_guard()
         self._ready = False
-        if self._tg.is_connected():
-            await self._tg.disconnect()
+        try:
+            if self._tg.is_connected():
+                await self._tg.disconnect()
+        except Exception as e:
+            log.warning("disconnect failed: %s", type(e).__name__)
 
     # Chats ---------------------------------------------------------------------------------
 
@@ -444,6 +507,7 @@ class TelethonGateway(Gateway):
         until: datetime | None,
         limit: int,
     ) -> list[Message]:
+        since, until = _aware(since), _aware(until)
         out: list[Message] = []
         async with self._session() as client:
             peer = await self._peer(client, chat_id)
@@ -452,7 +516,7 @@ class TelethonGateway(Gateway):
             ):
                 if since is not None and m.date < since:
                     break
-                out.append(self._map(m, chat_id))
+                out.extend(self._map(x, chat_id) for x in _plain([m]))
         log.info("history chat=%s n=%d", chat_id, len(out))
         return out
 
@@ -497,7 +561,7 @@ class TelethonGateway(Gateway):
             )
             # A raw result carries its users and chats apart; attach them for sender names.
             entities = {utils.get_peer_id(e): e for e in [*result.users, *result.chats]}
-            found = [m for m in result.messages if isinstance(m, types.Message)]
+            found = [m for m in _plain(result.messages) if isinstance(m, types.Message)]
             for m in found:
                 m._finish_init(client, entities, peer)
         out = [self._map(m, chat_id) for m in found]
@@ -507,15 +571,16 @@ class TelethonGateway(Gateway):
     async def search_global(
         self, query: str, *, since: date | None, until: date | None, limit: int
     ) -> list[Message]:
+        first_day = _utc_day(since) if since else None
         out: list[Message] = []
         async with self._session() as client:
             # Newest first, starting at the end of `until`; stop at the first hit before `since`.
             async for m in client.iter_messages(
                 None, search=query, limit=limit, offset_date=_day_end(until)
             ):
-                if since is not None and m.date.astimezone(UTC).date() < since:
+                if first_day is not None and m.date.astimezone(UTC).date() < first_day:
                     break
-                out.append(self._map(m, m.chat_id))
+                out.extend(self._map(x, x.chat_id) for x in _plain([m]))
         log.info("search_global n=%d", len(out))
         return out
 
@@ -530,20 +595,28 @@ class TelethonGateway(Gateway):
             target = self._map(found[0], chat_id)
             # In a forum the context stays inside the target's topic.
             topic = target.topic_id if self._chats[chat_id].is_forum else None
-            older = [
-                self._map(m, chat_id)
-                async for m in client.iter_messages(
-                    peer, limit=before, offset_id=message_id, reply_to=topic
-                )
-            ]
-            newer = [
-                self._map(m, chat_id)
-                async for m in client.iter_messages(
-                    peer, limit=after, min_id=message_id, reverse=True, reply_to=topic
-                )
-            ]
+            older = _plain(
+                [
+                    m
+                    async for m in client.iter_messages(
+                        peer, limit=before, offset_id=message_id, reply_to=topic
+                    )
+                ]
+            )
+            newer = _plain(
+                [
+                    m
+                    async for m in client.iter_messages(
+                        peer, limit=after, min_id=message_id, reverse=True, reply_to=topic
+                    )
+                ]
+            )
         log.info("around chat=%s before=%d after=%d", chat_id, len(older), len(newer))
-        return older[::-1], target, newer
+        return (
+            [self._map(m, chat_id) for m in reversed(older)],
+            target,
+            [self._map(m, chat_id) for m in newer],
+        )
 
 
 def factory(settings: Settings) -> Gateway:
