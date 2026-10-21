@@ -22,17 +22,21 @@ Today a message with a photo or a file only says that one is there. Downloading 
 
 Telegram users group chats into folders ("Work", "Family"). Letting `list_chats` filter by folder and `search_messages` scope to one would make questions shorter and results more focused. The price: one more API call and the mapping of folder rules (included chats, excluded types) to dialogs, which Telegram defines in a fairly involved way.
 
-## A pagination cursor after the service-message safety stop
-
-A page of history skips service messages (joins, pins) and gives up after a fixed number of raw messages, so a long run of them cannot keep it fetching. The page can then end short, and the cursor to continue is only given for a full page. Returning a cursor in this case too would let Claude page through such chats. The price is small: a cursor that is correct when the stop happens inside a run of service messages, and tests for it.
-
 ## `whoami --devices`
 
 List Telegram's active sessions (name, platform, last active) so a user can see this tool's device and end others. The price: one more Telegram request that reads account-security data, and care that the output never reveals more than the user needs. Ending sessions would be a write action and stays out.
 
-## CI on `windows-latest`
+## Refill global search after dropping hidden chats
 
-CI runs on Linux, where DPAPI and `icacls` are replaced by stubs. A Windows job would run the real DPAPI round trip and the real folder-permission code on every change. The price: longer CI runs and Windows runner quirks (profile folders, `icacls` output). Worth it because that code protects the secrets.
+A search across all chats asks Telegram for `limit` hits and then drops those from hidden chats, so a page can come back shorter than asked, with `truncated` set (which also tells, by count only, that hidden hits exist). Fetching one more chunk until the page is full would give Claude full pages. The price: more requests per search and a loop that must stop on its own.
+
+## Checks that need a live account
+
+Three behaviours were reasoned from Telethon's code but not yet confirmed on a real account: reading the General topic of a forum (`getReplies` with message id 1; if Telegram refuses it, use the plain history filtered to topic 1), whether `list_topics` returns more than 100 topics when asked for 200 (if not, cap the tool at 100 or page through), and what Telegram answers to a per-chat search with an empty query and no sender (today it would surface as "Global search needs a query.", the wrong sentence for one chat). Each needs one call on a real account and, depending on the answer, a small fix.
+
+## Smaller clean-ups
+
+`tgmcp login` and the gateway each have their own fallback ladder over the secrets file and the old clear-text files; one `stored_credentials()` in `secrets.py` would replace both. The idle guard wakes every minute to check the clock; one sleep until the deadline would do. The idle-guard tests use real short sleeps; an injectable sleep would make them independent of the wall clock.
 
 ## Packaging
 

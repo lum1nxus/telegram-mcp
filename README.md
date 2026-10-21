@@ -30,6 +30,14 @@ In **cmd.exe** write the paths with backslashes: `.venv\Scripts\tgmcp login`. Th
 - It cannot download media; a message with a photo or a file only shows that one is there.
 - It keeps no copy of your chats on disk. Messages are fetched from Telegram when asked and forgotten afterwards.
 
+### How read-only is enforced
+
+Three layers, so the promise does not rest on good intentions:
+
+1. **At run time.** tgmcp talks to Telegram through `ReadOnlyClient`, a Telethon client that checks every request before it leaves the computer against a short list of reading requests (list dialogs, read history, search, read a channel's details and a forum's topics, plus what connecting needs). Anything else, however it was built, is refused and nothing is sent. `tgmcp login` and `tgmcp logout` use a second client whose list holds only the sign-in requests and the log-out.
+2. **In the source.** A test reads every module of the package and fails on write-shaped names (`send`, `delete`, `reply`, `download`, ...), on dynamic tricks that could hide a call (`eval`, `vars`, computed `getattr`, ...), and on any Telethon name inside `tgmcp/telegram/` that is not on an explicit list.
+3. **The contract test** also sends the forbidden requests to the real client class (without a network) and checks that each one is refused, including the ones reached through a returned message (`reply`, `delete`, `mark as read`).
+
 ## First run
 
 Every command below is typed in a terminal: open **Git Bash**, **PowerShell** or **cmd.exe**, then go to the folder you cloned the repository into:
@@ -106,11 +114,15 @@ Every tool is read-only and does not reach beyond your account (annotations: rea
 | `list_chats` | `query` (none), `kind` (none: user, group or channel), `include_archived` (false), `limit` (50, 1 to 200) |
 | `get_chat` | `chat` (id, @username, title or part of it) |
 | `list_topics` | `chat`, `limit` (100, 1 to 200) |
-| `search_messages` | `query` (not empty), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none: user id or @username; needs `chat`), `since` (none, a date), `until` (none, a date), `limit` (30, 1 to 100) |
-| `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
+| `search_messages` | `query` (not empty), `chat` (none: all chats), `topic` (none; needs `chat`), `sender` (none: a user id or @username tgmcp has already seen, for example a `sender_id` from `get_messages`; needs `chat`), `since` (none, a date), `until` (none, a date), `limit` (30, 1 to 100) |
+| `get_messages` | `chat`, `topic` (none), `since` (none, a date and time), `until` (none, a date and time, not included), `before_id` (none, at least 1), `limit` (50, 1 to 100) |
 | `get_message_context` | `chat`, `message_id` (at least 1), `before` (10, 0 to 30), `after` (10, 0 to 30) |
 
 Dates and times are UTC: `since` and `until` of `search_messages` are whole UTC days (both included), and a date and time without a time zone in `get_messages` is taken as UTC. If you live east of Greenwich, a message sent just after your local midnight belongs to the previous UTC day.
+
+Answers are kept small: a message text is cut at 2 000 characters (`get_message_context` with `before=0, after=0` returns it in full), and a result stops at about 30 KB, with `truncated: true` and, for `get_messages`, a `next_before_id` to continue. `get_messages` also says `truncated` when it stopped early in a long run of service messages (joins, pins); the cursor then continues below them.
+
+`sender` only accepts people tgmcp has already seen in this session: someone in your chat list, or the author of a message a tool has returned. It never looks a name up on Telegram's servers, because that lookup is one of the requests Telegram limits most strictly.
 
 ## Search semantics
 
@@ -121,7 +133,7 @@ Telegram search matches the beginnings of words, not fragments: "market" finds "
 - It sees everything your Telegram account sees (private chats, groups, channels, archived chats), except the chats you hide. What a tool returns goes to Claude as part of your conversation, like anything else you let Claude read.
 - Forwarded messages name where they came from (`forwarded_from`), even when the source chat is hidden.
 - A channel's comments live in its linked discussion group, which holds a copy of every post.
-- Nothing leaves your PC except requests to Telegram's servers and the tool answers that go to Claude. There is no telemetry. Logs hold tool names, counts and errors, never message text.
+- Nothing leaves your PC except requests to Telegram's servers and the tool answers that go to Claude. There is no telemetry. Logs hold tool names, counts and error types, never message text, chat titles or what Claude asked for.
 - A chat can contain text that looks like instructions to Claude. The tools tell Claude to treat message text as data, but stay alert if an answer suggests something odd. See [SECURITY.md](SECURITY.md).
 
 ### Hidden chats
